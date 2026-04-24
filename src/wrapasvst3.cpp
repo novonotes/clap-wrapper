@@ -22,6 +22,7 @@
 #include "detail/vst3/process.h"
 #include "detail/vst3/parameter.h"
 #include "detail/clap/fsutil.h"
+#include "detail/os/log.h"
 #include <locale>
 #include <sstream>
 
@@ -249,7 +250,18 @@ tresult PLUGIN_API ClapAsVst3::canProcessSampleSize(int32 symbolicSampleSize)
 
 tresult PLUGIN_API ClapAsVst3::setState(IBStream *state)
 {
-  return (_plugin->load(CLAPVST3StreamAdapter(state)) ? Steinberg::kResultOk : Steinberg::kResultFalse);
+  const auto ok = _plugin->load(CLAPVST3StreamAdapter(state));
+  LOGINFO("ClapAsVst3::setState load result={}", ok);
+  if (!ok) return Steinberg::kResultFalse;
+
+  const auto changed = syncParameterValuesFromClap("setState");
+  LOGINFO("ClapAsVst3::setState synced wrapped parameters changed={}", changed);
+  if (changed && this->componentHandler)
+  {
+    this->componentHandler->restartComponent(Vst::RestartFlags::kParamValuesChanged);
+  }
+
+  return Steinberg::kResultOk;
 }
 
 tresult PLUGIN_API ClapAsVst3::getState(IBStream *state)
@@ -1092,6 +1104,39 @@ void ClapAsVst3::setupParameters(const clap_plugin_t *plugin, const clap_plugin_
   // PRESSURE is handled by IMidiMapping (-> Polypressure)
 }
 
+bool ClapAsVst3::syncParameterValuesFromClap(const char *reason)
+{
+  if (!_plugin || !_plugin->_ext._params) return false;
+
+  bool changed = false;
+  auto len = parameters.getParameterCount();
+  for (decltype(len) i = 0; i < len; ++i)
+  {
+    auto p = static_cast<Vst3Parameter *>(parameters.getParameterByIndex(i));
+    if (p->isMidi) continue;
+
+    double val;
+    if (_plugin->_ext._params->get_value(_plugin->_plugin, p->id, &val))
+    {
+      const auto old_normalized = p->getNormalized();
+      const auto new_normalized = p->asVst3Value(val);
+      LOGDETAIL("syncParameterValuesFromClap reason={} param_id={} clap_value={} vst3_old={} vst3_new={}",
+                reason, p->id, val, old_normalized, new_normalized);
+      if (old_normalized != new_normalized)
+      {
+        p->setNormalized(new_normalized);
+        changed = true;
+      }
+    }
+    else
+    {
+      LOGINFO("syncParameterValuesFromClap reason={} param_id={} get_value failed", reason, p->id);
+    }
+  }
+
+  return changed;
+}
+
 void ClapAsVst3::param_rescan(clap_param_rescan_flags flags)
 {
   auto vstflags = 0u;
@@ -1110,21 +1155,14 @@ void ClapAsVst3::param_rescan(clap_param_rescan_flags flags)
   if (vstflags == 0) return;
 
   // update parameter values in our own tree
+  syncParameterValuesFromClap("param_rescan");
+
   auto len = parameters.getParameterCount();
   for (decltype(len) i = 0; i < len; ++i)
   {
     auto p = static_cast<Vst3Parameter *>(parameters.getParameterByIndex(i));
     if (!p->isMidi)
     {
-      double val;
-      if (_plugin->_ext._params->get_value(_plugin->_plugin, p->id, &val))
-      {
-        auto newval = p->asVst3Value(val);
-        if (p->getNormalized() != newval)
-        {
-          p->setNormalized(newval);
-        }
-      }
       if (flags & CLAP_PARAM_RESCAN_INFO)
       {
         // In this case, the name and module can also change.
