@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include "../clap/automation.h"
+#include "../os/log.h"
 
 namespace Clap
 {
@@ -370,6 +371,8 @@ void ProcessAdapter::process(Steinberg::Vst::ProcessData &data)
             n.param.key = -1;
 
             n.param.value = param->asClapValue(value);
+            LOGDETAIL("ProcessAdapter mapped VST3 input parameter change: vst3_param_id={} clap_param_id={} normalized_value={} clap_value={} sample_offset={}",
+                      paramid, param->id, value, n.param.value, offset);
             _eventindices.push_back(_events.size());
             _events.push_back(n);
           }
