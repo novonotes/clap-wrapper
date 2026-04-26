@@ -340,51 +340,60 @@ function(guarantee_aaxsdk)
         # target_sources(base-sdk-vst3 PRIVATE ${AAX_SDK_ROOT}/public.sdk/source/main/dllmain.cpp) -- aax?
     endif()
 
-    target_sources(base-sdk-aax PRIVATE
-#            ${AAX_GLOB}
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_CACFUnknown.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_CChunkDataParser.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_CEffectDirectData.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_CEffectGUI.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_CEffectParameters.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_CHostProcessor.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_CHostServices.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_CMutex.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_CommonConversions.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_CPacketDispatcher.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_CParameter.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_CParameterManager.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_CSessionDocumentClient.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_CString.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_CTaskAgent.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_CUIDs.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_IEffectDirectData.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_IEffectGUI.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_IEffectParameters.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_IHostProcessor.cpp
-            # ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_Init.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_ISessionDocumentClient.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_ITaskAgent.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_Properties.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_SliderConversions.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_VAutomationDelegate.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_VCollection.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_VComponentDescriptor.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_VController.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_VDataBufferWrapper.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_VDescriptionHost.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_VEffectDescriptor.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_VFeatureInfo.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_VHostProcessorDelegate.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_VHostServices.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_VPageTable.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_VPrivateDataAccess.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_VPropertyMap.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_VSessionDocument.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_VTask.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_VTransport.cpp
-            ${AAX_SDK_ROOT}/Libs/AAXLibrary/source/AAX_VViewContainer.cpp
-            )
+    set(AAX_LIBRARY_SOURCES
+            AAX_CACFUnknown.cpp
+            AAX_CChunkDataParser.cpp
+            AAX_CEffectDirectData.cpp
+            AAX_CEffectGUI.cpp
+            AAX_CEffectParameters.cpp
+            AAX_CHostProcessor.cpp
+            AAX_CHostServices.cpp
+            AAX_CMutex.cpp
+            AAX_CommonConversions.cpp
+            AAX_CPacketDispatcher.cpp
+            AAX_CParameter.cpp
+            AAX_CParameterManager.cpp
+            AAX_CSessionDocumentClient.cpp
+            AAX_CString.cpp
+            AAX_CTaskAgent.cpp
+            AAX_CUIDs.cpp
+            AAX_IEffectDirectData.cpp
+            AAX_IEffectGUI.cpp
+            AAX_IEffectParameters.cpp
+            AAX_IHostProcessor.cpp
+            AAX_ISessionDocumentClient.cpp
+            AAX_ITaskAgent.cpp
+            AAX_Properties.cpp
+            AAX_SliderConversions.cpp
+            AAX_VAutomationDelegate.cpp
+            AAX_VCollection.cpp
+            AAX_VComponentDescriptor.cpp
+            AAX_VController.cpp
+            AAX_VDataBufferWrapper.cpp
+            AAX_VDescriptionHost.cpp
+            AAX_VEffectDescriptor.cpp
+            AAX_VFeatureInfo.cpp
+            AAX_VHostProcessorDelegate.cpp
+            AAX_VHostServices.cpp
+            AAX_VPageTable.cpp
+            AAX_VPrivateDataAccess.cpp
+            AAX_VPropertyMap.cpp
+            AAX_VSessionDocument.cpp
+            AAX_VTask.cpp
+            AAX_VTransport.cpp
+            AAX_VViewContainer.cpp
+    )
+    set(AAX_LIBRARY_SOURCE_PATHS)
+    foreach(aax_source IN LISTS AAX_LIBRARY_SOURCES)
+        set(aax_source_path "${AAX_SDK_ROOT}/Libs/AAXLibrary/source/${aax_source}")
+        if(EXISTS "${aax_source_path}")
+            list(APPEND AAX_LIBRARY_SOURCE_PATHS "${aax_source_path}")
+        else()
+            message(STATUS "clap-wrapper: skipping unavailable AAX source ${aax_source}")
+        endif()
+    endforeach()
+
+    target_sources(base-sdk-aax PRIVATE ${AAX_LIBRARY_SOURCE_PATHS})
 
     # The VST3 SDK doesn't compile with unity builds
     # set_target_properties(base-sdk-AAX PROPERTIES UNITY_BUILD FALSE) -- aax?
@@ -404,6 +413,9 @@ function(guarantee_aaxsdk)
         target_compile_options(base-sdk-aax PUBLIC /wd5033)
     else()
         target_compile_options(base-sdk-aax PUBLIC -Wno-register)
+    endif()
+    if (APPLE)
+        target_compile_definitions(base-sdk-aax PUBLIC TARGET_OS_IOS=0)
     endif()
 
     target_link_libraries(base-sdk-aax PUBLIC clap-wrapper-sanitizer-options)

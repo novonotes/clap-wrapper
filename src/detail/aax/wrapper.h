@@ -82,7 +82,8 @@ class AAXProcessAdapter
   void setupProcessing(const clap_plugin_t *plugin, double samplerate,
                        const clap_plugin_params_t *ext_param, const clap_plugin_audio_ports *ext_audio,
                        Clap::IAutomation *automation, std::vector<clap_id> &gesturedParameters,
-                       ParamChangeQueue &inqueue, uint32_t midiportid, bool preferMIDI);
+                       ParamChangeQueue &inqueue, uint32_t midiportid, bool preferMIDI,
+                       bool hasMIDIInput);
   void process(SAAX_Wrapper_AlgorithmicContext *context);
   void flush();
 
@@ -139,6 +140,7 @@ class AAXProcessAdapter
   // MIDI
   uint32_t _midi_first_portid = 0;
   bool _midi_prefer_mididialect = true;
+  bool _has_midi_input = false;
 };
 
 AAX_Result GetEffectDescriptions(AAX_ICollection *outDescriptions);
@@ -277,6 +279,7 @@ class ClapAsAAX : public AAX_CEffectParameters,
 
   uint32_t _midi_first_portid = 0;
   bool _midi_prefer_mididialect = true;
+  bool _has_midi_input = false;
 
   ParamChangeQueue _paramsToProcess;
 

@@ -5,6 +5,9 @@ function(private_add_aax_wrapper_sources)
     set(tg ${PAX_TARGET})
     set(sd ${CLAP_WRAPPER_CMAKE_CURRENT_SOURCE_DIR})
     target_compile_definitions(${tg} PUBLIC CLAP_WRAPPER_BUILD_FOR_AAX=1)
+    if(APPLE)
+        target_compile_definitions(${tg} PUBLIC TARGET_OS_IOS=0)
+    endif()
 
     if(WIN32)
         target_sources(${tg} PRIVATE ${sd}/src/detail/os/windows.cpp)
@@ -142,6 +145,7 @@ function(target_add_aax_wrapper)
                 BUNDLE_EXTENSION aaxplugin
                 LIBRARY_OUTPUT_NAME ${AX_OUTPUT_NAME}
                 MACOSX_BUNDLE_GUI_IDENTIFIER ${AX_BUNDLE_IDENTIFIER}
+                XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER ${AX_BUNDLE_IDENTIFIER}
                 MACOSX_BUNDLE_BUNDLE_NAME ${AX_OUTPUT_NAME}
                 MACOSX_BUNDLE_BUNDLE_VERSION ${AX_BUNDLE_VERSION}
                 MACOSX_BUNDLE_SHORT_VERSION_STRING ${AX_BUNDLE_VERSION}

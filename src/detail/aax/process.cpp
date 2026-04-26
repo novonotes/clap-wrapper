@@ -60,7 +60,8 @@ void AAXProcessAdapter::setupProcessing(const clap_plugin_t *plugin, double samp
                                         const clap_plugin_audio_ports *ext_audio,
                                         Clap::IAutomation *automation,
                                         std::vector<clap_id> &gesturedparameters,
-                                        ParamChangeQueue &inqueue, uint32_t midiportid, bool preferMIDI)
+                                        ParamChangeQueue &inqueue, uint32_t midiportid,
+                                        bool preferMIDI, bool hasMIDIInput)
 {
   _plugin = plugin;
   _ext_param = ext_param;
@@ -70,6 +71,7 @@ void AAXProcessAdapter::setupProcessing(const clap_plugin_t *plugin, double samp
 
   _midi_first_portid = midiportid;
   _midi_prefer_mididialect = preferMIDI;
+  _has_midi_input = hasMIDIInput;
 
   // other needed references like buffers, MIDINodes etc. are passed
   // via the SAAX_Wrapper_AlgorithmicContext to the process function
@@ -236,65 +238,76 @@ void AAXProcessAdapter::process(SAAX_Wrapper_AlgorithmicContext *context)
   }
 
   // check MIDI IN
-  if (context->mInputNode)
+  if (_has_midi_input && context->mInputNode)
   {
     auto midiInputStream = context->mInputNode->GetNodeBuffer();
-    const AAX_CMidiPacket *midiInPacketPtr = midiInputStream->mBuffer;
-    auto numevents = midiInputStream->mBufferSize;
-
-    clap_multi_event_t n;  // re-using the event
-    n.note.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
-
-    while ((0 < numevents) && (NULL != midiInPacketPtr))
+    if (!midiInputStream)
     {
-      // this is the same for all packets
-      n.note.header.flags = (midiInPacketPtr->mIsImmediate) ? CLAP_EVENT_IS_LIVE : 0;
-      n.note.header.time = midiInPacketPtr->mTimestamp;
-      n.note.header.size = sizeof(clap_event_note);
-
-      if (AAX::IsNoteOff(midiInPacketPtr) && !_midi_prefer_mididialect)
-      {
-        n.note.header.type = CLAP_EVENT_NOTE_OFF;
-        n.note.channel = midiInPacketPtr->mData[0] & 0x0F;  // channel
-        n.note.note_id = -1;
-        n.note.port_index = _midi_first_portid;
-        n.note.velocity = midiInPacketPtr->mData[2];
-        n.note.key = midiInPacketPtr->mData[1];
-        _eventindices.push_back(_events.size());
-        _events.emplace_back(n);
-      }
-      else if (AAX::IsNoteOn(midiInPacketPtr) && !_midi_prefer_mididialect)
-      {
-        n.note.header.type = CLAP_EVENT_NOTE_ON;
-        n.note.channel = midiInPacketPtr->mData[0] & 0x0F;  // channel
-        n.note.note_id = -1;
-        n.note.port_index = _midi_first_portid;
-        n.note.velocity = midiInPacketPtr->mData[2];
-        n.note.key = midiInPacketPtr->mData[1];
-        _eventindices.push_back(_events.size());
-        _events.emplace_back(n);
-      }
-      else if ((midiInPacketPtr->mData[0] & 0XF0) < 0xF0)
-      {
-        n.midi.header.type = CLAP_EVENT_MIDI;
-        n.note.note_id = -1;
-        n.note.port_index = _midi_first_portid;
-        n.midi.data[0] = midiInPacketPtr->mData[0];
-        n.midi.data[1] = midiInPacketPtr->mData[1];
-        n.midi.data[2] = midiInPacketPtr->mData[2];
-        // ignoring midiInPacketPtr->mData[4];
-
-        _eventindices.push_back(_events.size());
-        _events.emplace_back(n);
-      }
-      else
-      {
-        // no sysex for now
-      }
-
-      ++midiInPacketPtr;
-      --numevents;
+      LOGDETAIL("AAX MIDI input node returned null buffer");
     }
+    else
+    {
+      const AAX_CMidiPacket *midiInPacketPtr = midiInputStream->mBuffer;
+      auto numevents = midiInputStream->mBufferSize;
+
+      clap_multi_event_t n;  // re-using the event
+      n.note.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+
+      while ((0 < numevents) && (NULL != midiInPacketPtr))
+      {
+        // this is the same for all packets
+        n.note.header.flags = (midiInPacketPtr->mIsImmediate) ? CLAP_EVENT_IS_LIVE : 0;
+        n.note.header.time = midiInPacketPtr->mTimestamp;
+        n.note.header.size = sizeof(clap_event_note);
+
+        if (AAX::IsNoteOff(midiInPacketPtr) && !_midi_prefer_mididialect)
+        {
+          n.note.header.type = CLAP_EVENT_NOTE_OFF;
+          n.note.channel = midiInPacketPtr->mData[0] & 0x0F;  // channel
+          n.note.note_id = -1;
+          n.note.port_index = _midi_first_portid;
+          n.note.velocity = midiInPacketPtr->mData[2];
+          n.note.key = midiInPacketPtr->mData[1];
+          _eventindices.push_back(_events.size());
+          _events.emplace_back(n);
+        }
+        else if (AAX::IsNoteOn(midiInPacketPtr) && !_midi_prefer_mididialect)
+        {
+          n.note.header.type = CLAP_EVENT_NOTE_ON;
+          n.note.channel = midiInPacketPtr->mData[0] & 0x0F;  // channel
+          n.note.note_id = -1;
+          n.note.port_index = _midi_first_portid;
+          n.note.velocity = midiInPacketPtr->mData[2];
+          n.note.key = midiInPacketPtr->mData[1];
+          _eventindices.push_back(_events.size());
+          _events.emplace_back(n);
+        }
+        else if ((midiInPacketPtr->mData[0] & 0XF0) < 0xF0)
+        {
+          n.midi.header.type = CLAP_EVENT_MIDI;
+          n.note.note_id = -1;
+          n.note.port_index = _midi_first_portid;
+          n.midi.data[0] = midiInPacketPtr->mData[0];
+          n.midi.data[1] = midiInPacketPtr->mData[1];
+          n.midi.data[2] = midiInPacketPtr->mData[2];
+          // ignoring midiInPacketPtr->mData[4];
+
+          _eventindices.push_back(_events.size());
+          _events.emplace_back(n);
+        }
+        else
+        {
+          // no sysex for now
+        }
+
+        ++midiInPacketPtr;
+        --numevents;
+      }
+    }
+  }
+  else if (!_has_midi_input && context->mInputNode)
+  {
+    LOGDETAIL("AAX MIDI input node present in context, but CLAP plugin has no MIDI input port");
   }
 
   _proc.frames_count = *(context->mNumSamples);

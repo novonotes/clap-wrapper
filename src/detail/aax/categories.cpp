@@ -10,6 +10,10 @@
 
 // clang-format off
 
+#ifndef AAX_EPlugInCategory_MIDIEffect
+#define AAX_EPlugInCategory_MIDIEffect AAX_EPlugInCategory_Effect
+#endif
+
 static const struct _translation
 {
   const char* clapattribute;

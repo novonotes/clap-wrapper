@@ -34,6 +34,7 @@
 // ----[AAX WRAPPER]----------------------------------------------------------------
 #include "process.h"
 #include "categories.h"
+#include "main_thread.h"
 #include "util.h"
 #include "clapwrapper/aax.h"
 #include "plugview.h"
@@ -161,6 +162,7 @@ static void DescribeAlgorithmComponent(AAX_IComponentDescriptor *outDesc,
   // Register MIDI nodes. To avoid context corruption, register small blocks of private data for fields where a node is not needed
   AAX_CFieldIndex globalNodeID = AAX_FIELD_INDEX(SAAX_Wrapper_AlgorithmicContext, mGlobalNode);
   AAX_CFieldIndex localInputNodeID = AAX_FIELD_INDEX(SAAX_Wrapper_AlgorithmicContext, mInputNode);
+  AAX_CFieldIndex localOutputNodeID = AAX_FIELD_INDEX(SAAX_Wrapper_AlgorithmicContext, mOutputNode);
   AAX_CFieldIndex transportNodeID = AAX_FIELD_INDEX(SAAX_Wrapper_AlgorithmicContext, mTransportNode);
 
   // Global MIDI node — not currently used
@@ -186,11 +188,16 @@ static void DescribeAlgorithmComponent(AAX_IComponentDescriptor *outDesc,
   if (businfo.has_midi_out)
   {
     if (aax_plugin_info && aax_plugin_info->midi_out_name)
-      err = outDesc->AddMIDINode(localInputNodeID, AAX_eMIDINodeType_LocalOutput,
+      err = outDesc->AddMIDINode(localOutputNodeID, AAX_eMIDINodeType_LocalOutput,
                                  aax_plugin_info->midi_out_name, aax_plugin_info->midi_out_channel_mask);
     else
-      err = outDesc->AddMIDINode(localInputNodeID, AAX_eMIDINodeType_LocalOutput,
+      err = outDesc->AddMIDINode(localOutputNodeID, AAX_eMIDINodeType_LocalOutput,
                                  businfo.midi_out_name.c_str(), 0xFFFF);
+  }
+  else
+  {
+    err = outDesc->AddPrivateData(localOutputNodeID, sizeof(float),
+                                  AAX_ePrivateDataOptions_DefaultOptions);
   }
 
   if (true)  // setupInfo.mNeedsTransport)
@@ -549,63 +556,53 @@ AAX_Result ClapAsAAX::EffectInit()
 
   if (_plugin)
   {
-    if (_plugin->initialize())
+    if (Clap::AAX::invokeOnMainThreadSync([this] { return _plugin->initialize(); }))
     {
-      // TODO: initialize calls wrapper specifics and sets up all busses etc.
+      auto configuration_applied = Clap::AAX::invokeOnMainThreadSync(
+          [this]
+          {
+            if (!_plugin->_ext._configurable_audio_ports)
+            {
+              return true;
+            }
+
+            AAX_EStemFormat stem_in, stem_out;
+            _aax_ctrl->GetInputStemFormat(&stem_in);
+            _aax_ctrl->GetOutputStemFormat(&stem_out);
+
+            auto numInChannels = AAX_STEM_FORMAT_CHANNEL_COUNT(stem_in);
+            auto numOutChannels = AAX_STEM_FORMAT_CHANNEL_COUNT(stem_out);
+            auto audioports = _plugin->_ext._audioports;
+
+            auto numInPorts = audioports->count(_plugin->_plugin, true);
+            auto numOutPorts = audioports->count(_plugin->_plugin, false);
+
+            for (uint32_t i = 0; i < numInPorts; ++i)
+            {
+              clap_audio_port_configuration_request rq;
+              build_config_request(&rq, numInChannels, i, true);
+              _configuration_requests.emplace_back(rq);
+            }
+
+            for (uint32_t i = 0; i < numOutPorts; ++i)
+            {
+              clap_audio_port_info_t p;
+              audioports->get(_plugin->_plugin, i, false, &p);
+              clap_audio_port_configuration_request rq;
+              build_config_request(&rq, numOutChannels, i, false);
+              _configuration_requests.emplace_back(rq);
+            }
+
+            return _plugin->_ext._configurable_audio_ports->apply_configuration(
+                _plugin->_plugin, _configuration_requests.data(),
+                (uint32_t)_configuration_requests.size());
+          });
+
+      if (!configuration_applied)
       {
-        if (_plugin->_ext._configurable_audio_ports)
-        {
-          // configurable - yeah! apply the configuration
-          AAX_EStemFormat stem_in, stem_out;
-          _aax_ctrl->GetInputStemFormat(&stem_in);
-          _aax_ctrl->GetOutputStemFormat(&stem_out);
-
-          auto numInChannels = AAX_STEM_FORMAT_CHANNEL_COUNT(stem_in);
-          auto numOutChannels = AAX_STEM_FORMAT_CHANNEL_COUNT(stem_out);
-          auto audioports = _plugin->_ext._audioports;
-
-          auto numInPorts = audioports->count(_plugin->_plugin, true);
-          auto numOutPorts = audioports->count(_plugin->_plugin, false);
-
-          // building configuration requests for all ports, but configure it with the STEM format
-          for (uint32_t i = 0; i < numInPorts; ++i)
-          {
-            // get the port info
-            //clap_audio_port_info_t p;
-            //audioports->get(_plugin->_plugin, i, true, &p); <- since port_index is not port.id, the port info is not needed
-            clap_audio_port_configuration_request rq;
-            build_config_request(&rq, numInChannels, i, true);
-            _configuration_requests.emplace_back(rq);
-          }
-
-          for (uint32_t i = 0; i < numOutPorts; ++i)
-          {
-            // get the port info
-            clap_audio_port_info_t p;
-            audioports->get(_plugin->_plugin, i, false, &p);
-            clap_audio_port_configuration_request rq;
-            build_config_request(&rq, numOutChannels, i, false);
-            _configuration_requests.emplace_back(rq);
-          }
-
-          if (!_plugin->_ext._configurable_audio_ports->apply_configuration(
-                  _plugin->_plugin, _configuration_requests.data(),
-                  (uint32_t)_configuration_requests.size()))
-          {
-            LOGINFO(fmt::format(
-                "audio port configuration could not be applied. Ports {}/{} with {}/{} channels",
-                numInPorts, numOutPorts, numInChannels, numOutChannels));
-            return AAX_ERROR_NOT_INITIALIZED;
-          }
-        }
-        else
-        {
-          // when no configurable audio ports exist, the CLAP just works with the
-          // given audio port config and predefined audio configuration
-        }
+        LOGINFO("audio port configuration could not be applied");
+        return AAX_ERROR_NOT_INITIALIZED;
       }
-
-      // set samplerate
 
       // set samplerate
       AAX_CSampleRate sr;
@@ -711,8 +708,13 @@ AAX_Result ClapAsAAX::GetParameterValueFromString(AAX_CParamID iParameterID, dou
   auto n = this->_parameterMap.find(iParameterID);
   if (n != _parameterMap.end())
   {
-    if (n->second->_ext_params->text_to_value(_plugin->_plugin, n->second->_clap_param_info.id,
-                                              iValueString.Get(), oValuePtr))
+    if (Clap::AAX::invokeOnMainThreadSync(
+            [&]
+            {
+              return n->second->_ext_params->text_to_value(_plugin->_plugin,
+                                                           n->second->_clap_param_info.id,
+                                                           iValueString.Get(), oValuePtr);
+            }))
     {
       return AAX_SUCCESS;
     }
@@ -734,8 +736,13 @@ AAX_Result ClapAsAAX::GetParameterStringFromValue(AAX_CParamID iParameterID, dou
   if (n != _parameterMap.end())
   {
     char flomf[256];
-    if (this->_plugin->_ext._params->value_to_text(_plugin->_plugin, n->second->_clap_param_info.id,
-                                                   n->second->asClapValue(value), flomf, sizeof(flomf)))
+    if (Clap::AAX::invokeOnMainThreadSync(
+            [&]
+            {
+              return this->_plugin->_ext._params->value_to_text(
+                  _plugin->_plugin, n->second->_clap_param_info.id, n->second->asClapValue(value),
+                  flomf, sizeof(flomf));
+            }))
     {
       *valueString = flomf;
       return AAX_SUCCESS;
@@ -834,7 +841,7 @@ AAX_Result ClapAsAAX::GetChunkSize(AAX_CTypeID iChunkID, uint32_t *oSize) const
   // The chunk provided in GetChunk() must have the same size as the size provided by GetChunkSize().
 
   _state.clear();
-  if (_plugin->_ext._state->save(_plugin->_plugin, _state))
+  if (Clap::AAX::invokeOnMainThreadSync([&] { return _plugin->_ext._state->save(_plugin->_plugin, _state); }))
   {
     *oSize = static_cast<uint32_t>(_state.size());
     return AAX_SUCCESS;
@@ -873,7 +880,7 @@ AAX_Result ClapAsAAX::SetChunk(AAX_CTypeID iChunkID, const AAX_SPlugInChunk *iCh
 
   auto data = (const uint8_t *)(iChunk->fData);
   _state.setData(data, iChunk->fSize);
-  if (_plugin->_ext._state->load(_plugin->_plugin, _state))
+  if (Clap::AAX::invokeOnMainThreadSync([&] { return _plugin->_ext._state->load(_plugin->_plugin, _state); }))
   {
     return AAX_SUCCESS;
   }
@@ -937,70 +944,81 @@ void ClapAsAAX::setupAudioBusses(const clap_plugin_t *plugin,
 
 void ClapAsAAX::setupMIDIBusses(const clap_plugin_t *plugin, const clap_plugin_note_ports_t *noteports)
 {
-  if (noteports->count(plugin, true) > 0)
-  {
-    clap_note_port_info_t info;
-    if (noteports->get(plugin, 0, true, &info))
-    {
-      this->_midi_first_portid = info.id;
-      this->_midi_prefer_mididialect = (info.preferred_dialect & CLAP_NOTE_DIALECT_MIDI);
-    }
-  }
+  _has_midi_input = false;
+  _midi_prefer_mididialect = true;
+  _midi_first_portid = 0;
+
+  Clap::AAX::invokeOnMainThreadSync(
+      [&]
+      {
+        if (noteports->count(plugin, true) > 0)
+        {
+          clap_note_port_info_t info;
+          if (noteports->get(plugin, 0, true, &info))
+          {
+            this->_has_midi_input = true;
+            this->_midi_first_portid = info.id;
+            this->_midi_prefer_mididialect = (info.preferred_dialect & CLAP_NOTE_DIALECT_MIDI);
+          }
+        }
+      });
 }
 
 void ClapAsAAX::setupParameters(const clap_plugin_t *plugin, const clap_plugin_params_t *params)
 {
   if (!params) return;
 
-  auto numparams = params->count(plugin);
-  _paramsToProcess.init(numparams * 4);
-
-  for (decltype(numparams) i = 0; i < numparams; ++i)
-  {
-    clap_param_info info;
-    if (params->get_info(plugin, i, &info))
-    {
-      if (info.flags & CLAP_PARAM_IS_HIDDEN) continue;
-
-      std::string paramname;
-
-      if (info.module[0])
+  Clap::AAX::invokeOnMainThreadSync(
+      [&]
       {
-        // ignore leading '/'
-        if (info.module[0] == '/')
-          paramname = info.module + 1;
-        else
-          paramname = info.module;
+        auto numparams = params->count(plugin);
+        _paramsToProcess.init(numparams * 4);
 
-        paramname.push_back('/');
-      }
-      paramname.append(info.name);
+        for (decltype(numparams) i = 0; i < numparams; ++i)
+        {
+          clap_param_info info;
+          if (!params->get_info(plugin, i, &info))
+          {
+            continue;
+          }
+          if (info.flags & CLAP_PARAM_IS_HIDDEN) continue;
 
-      auto id = createAAXId(info.id);
+          std::string paramname;
 
-      auto wrappedParam = std::make_shared<AAXWrappedParameterInfo_t>(this->_plugin->_plugin, info, id);
+          if (info.module[0])
+          {
+            if (info.module[0] == '/')
+              paramname = info.module + 1;
+            else
+              paramname = info.module;
 
-      auto n = generateShortStrings(paramname);
-      wrappedParam->_names.reserve(n.size());
-      for (const auto &i : n)
-      {
-        wrappedParam->_names.emplace_back(AAX_CString(i));
-      }
+            paramname.push_back('/');
+          }
+          paramname.append(info.name);
 
-      // now to the lookup maps
-      _parameterMap[id] = wrappedParam;
-      _parameterMapCLAP[info.id] = wrappedParam;
+          auto id = createAAXId(info.id);
+          auto wrappedParam =
+              std::make_shared<AAXWrappedParameterInfo_t>(this->_plugin->_plugin, info, id);
 
-      auto p = new AAX_CParameter<double>(
-          _parameterMap[id]->_aax_identifier.c_str(), AAX_CString(paramname),
-          wrappedParam->asAAXValue(info.default_value), AAX_CLinearTaperDelegate<double>(0, 1),
-          AAX_ClapParamDisplayDelegate(wrappedParam), info.flags & CLAP_PARAM_IS_AUTOMATABLE);
-      mParameterManager.AddParameter(p);
+          auto n = generateShortStrings(paramname);
+          wrappedParam->_names.reserve(n.size());
+          for (const auto &name : n)
+          {
+            wrappedParam->_names.emplace_back(AAX_CString(name));
+          }
 
-      // get the index and store it for fast retrieval
-      wrappedParam->_paramAAXIndex = mParameterManager.GetParameterIndex(id.c_str());
-    }
-  }
+          _parameterMap[id] = wrappedParam;
+          _parameterMapCLAP[info.id] = wrappedParam;
+
+          auto p = new AAX_CParameter<double>(
+              _parameterMap[id]->_aax_identifier.c_str(), AAX_CString(paramname),
+              wrappedParam->asAAXValue(info.default_value), AAX_CLinearTaperDelegate<double>(0, 1),
+              AAX_ClapParamDisplayDelegate(wrappedParam), info.flags & CLAP_PARAM_IS_AUTOMATABLE);
+          mParameterManager.AddParameter(p);
+
+          wrappedParam->_paramAAXIndex = mParameterManager.GetParameterIndex(id.c_str());
+        }
+      });
   AAX_ASSERT(_activated == false);
 }
 
@@ -1014,25 +1032,27 @@ void ClapAsAAX::param_rescan(clap_param_rescan_flags flags)
 
   if (!_plugin || !_plugin->_ext._params) return;
 
-  uint32_t count = _plugin->_ext._params->count(_plugin->_plugin);
-  for (uint32_t i = 0; i < count; ++i)
-  {
-    clap_param_info_t info;
-    if (!_plugin->_ext._params->get_info(_plugin->_plugin, i, &info)) continue;
+  Clap::AAX::invokeOnMainThreadSync(
+      [&]
+      {
+        uint32_t count = _plugin->_ext._params->count(_plugin->_plugin);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+          clap_param_info_t info;
+          if (!_plugin->_ext._params->get_info(_plugin->_plugin, i, &info)) continue;
 
-    auto it = _parameterMapCLAP.find(info.id);
-    if (it == _parameterMapCLAP.end()) continue;
+          auto it = _parameterMapCLAP.find(info.id);
+          if (it == _parameterMapCLAP.end()) continue;
 
-    auto &wrapped = *it->second;
+          auto &wrapped = *it->second;
+          strncpy(wrapped._clap_param_info.name, info.name, CLAP_NAME_SIZE - 1);
+          wrapped._clap_param_info.name[CLAP_NAME_SIZE - 1] = '\0';
 
-    // Update our cached copy so display delegates stay consistent.
-    strncpy(wrapped._clap_param_info.name, info.name, CLAP_NAME_SIZE - 1);
-    wrapped._clap_param_info.name[CLAP_NAME_SIZE - 1] = '\0';
-
-    // Notify AAX; SetName() calls mAutomationDelegate->ParameterNameChanged() internally.
-    AAX_IParameter *aaxParam = mParameterManager.GetParameterByID(wrapped._aax_identifier.c_str());
-    if (aaxParam) aaxParam->SetName(AAX_CString(info.name));
-  }
+          AAX_IParameter *aaxParam =
+              mParameterManager.GetParameterByID(wrapped._aax_identifier.c_str());
+          if (aaxParam) aaxParam->SetName(AAX_CString(info.name));
+        }
+      });
 }
 
 void ClapAsAAX::param_clear(clap_id /*param*/, clap_param_clear_flags /*flags*/)
@@ -1054,8 +1074,7 @@ bool ClapAsAAX::gui_can_resize()
   auto g = _plugin->_ext._gui;
   if (!g) return false;
 
-  auto res = g->can_resize(_plugin->_plugin);
-  return res;
+  return Clap::AAX::invokeOnMainThreadSync([&] { return g->can_resize(_plugin->_plugin); });
 }
 
 bool ClapAsAAX::gui_request_resize(uint32_t width, uint32_t height)
@@ -1082,7 +1101,17 @@ bool ClapAsAAX::gui_request_hide()
 
 void ClapAsAAX::latency_changed()
 {
-  _aax_ctrl->SetSignalLatency(_plugin->_ext._latency->get(_plugin->_plugin));
+  auto newlatency = Clap::AAX::invokeOnMainThreadSync(
+      [&]
+      {
+        if (!_plugin->_ext._latency)
+        {
+          return 0U;
+        }
+        return _plugin->_ext._latency->get(_plugin->_plugin);
+      });
+  _latency = newlatency;
+  _aax_ctrl->SetSignalLatency(_latency);
   // will be signalled from the host with a latency notification
   // see AAX_eNotificationEvent_SignalLatencyChanged
 }
@@ -1214,24 +1243,33 @@ void ClapAsAAX::activatePlugin()
 {
   if (!_activated)
   {
-    _gesturedparameters.reserve(8192);
+    Clap::AAX::invokeOnMainThreadSync(
+        [this]
+        {
+          auto scope = _plugin->AlwaysMainThread();
 
-    _processAdapter = std::make_unique<AAXProcessAdapter>();
-    _processAdapter->setupProcessing(_plugin->_plugin, _plugin->getSampleRate(), _plugin->_ext._params,
-                                     _plugin->_ext._audioports, this, _gesturedparameters,
-                                     _paramsToProcess, _midi_first_portid, _midi_prefer_mididialect);
+          _gesturedparameters.reserve(8192);
 
-    _activated = true;
-    _plugin->activate();
+          _processAdapter = std::make_unique<AAXProcessAdapter>();
+          _processAdapter->setupProcessing(_plugin->_plugin, _plugin->getSampleRate(),
+                                           _plugin->_ext._params, _plugin->_ext._audioports, this,
+                                           _gesturedparameters, _paramsToProcess, _midi_first_portid,
+                                           _midi_prefer_mididialect, _has_midi_input);
 
-    // pass latency when activated
-    auto scope = _plugin->AlwaysMainThread();
-    auto newlatency = _plugin->_ext._latency->get(_plugin->_plugin);
-    if (newlatency != _latency)
-    {
-      _latency = newlatency;
-      _aax_ctrl->SetSignalLatency(_latency);
-    }
+          _activated = true;
+          _plugin->activate();
+
+          auto newlatency = 0U;
+          if (_plugin->_ext._latency)
+          {
+            newlatency = _plugin->_ext._latency->get(_plugin->_plugin);
+          }
+          if (newlatency != _latency)
+          {
+            _latency = newlatency;
+            _aax_ctrl->SetSignalLatency(_latency);
+          }
+        });
   }
 }
 
@@ -1239,9 +1277,14 @@ void ClapAsAAX::deactivatePlugin()
 {
   if (_activated)
   {
-    _activated = false;
-    _plugin->deactivate();
-    _processAdapter.reset();
+    Clap::AAX::invokeOnMainThreadSync(
+        [this]
+        {
+          auto scope = _plugin->AlwaysMainThread();
+          _activated = false;
+          _plugin->deactivate();
+          _processAdapter.reset();
+        });
   }
 }
 
