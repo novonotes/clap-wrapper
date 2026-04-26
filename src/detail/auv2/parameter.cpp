@@ -1,5 +1,5 @@
-
 #include "parameter.h"
+#include "main_thread.h"
 
 namespace Clap::AUv2
 {
@@ -51,7 +51,12 @@ void Parameter::updateInfo(const clap_plugin_t *plugin, const clap_plugin_params
 
   {
     char buf[200];
-    if (clap_param_ext->value_to_text(plugin, info.id, info.default_value, buf, sizeof(buf)))
+    if (Clap::AUv2::invokeOnMainThreadSync(
+            [plugin, clap_param_ext, &info, &buf]
+            {
+              return clap_param_ext->value_to_text(plugin, info.id, info.default_value, buf,
+                                                   sizeof(buf));
+            }))
     {
       flags |= kAudioUnitParameterFlag_HasName;
     }

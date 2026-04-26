@@ -1,4 +1,5 @@
 #include "generated_entrypoints.hxx"
+#include "detail/auv2/main_thread.h"
 #include "detail/auv2/process.h"
 #include <set>
 #include <limits>
@@ -345,75 +346,87 @@ void WrapAsAUV2::setupMIDIBusses(const clap_plugin_t *plugin, const clap_plugin_
 
 void WrapAsAUV2::setupParameters(const clap_plugin_t *plugin, const clap_plugin_params_t *params)
 {
-  auto guarantee_mainthread = _plugin->AlwaysMainThread();
-  // creating parameters.
-
-  _clumps.reset();
-  _orderedParameterList.clear();
-  _paramOrderingProvided = false;
-  auto *p = _plugin->_ext._params;
-  if (p)
-  {
-    uint32_t numparams = p->count(_plugin->_plugin);
-
-    // If the plugin provides a custom AUv2 param ordering, build an indirection array.
-    // order[i] is the CLAP param index to use for AUv2 position i.
-    std::vector<size_t> orderingStorage;
-    const size_t *ordering = nullptr;
-    auto *paramOrdering = _plugin->_ext._auv2_param_ordering;
-    if (paramOrdering)
-    {
-      // Pre-fill with an out-of-range sentinel so we can detect untouched slots.
-      orderingStorage.assign(numparams, std::numeric_limits<size_t>::max());
-      if (paramOrdering->get_param_order(_plugin->_plugin, orderingStorage.data(), numparams))
+  Clap::AUv2::invokeOnMainThreadSync(
+      [this]
       {
-        // Sanity-check: every index 0..numparams-1 must appear exactly once.
-        std::set<size_t> seen;
-        bool orderingValid = true;
-        for (size_t i = 0; i < numparams; ++i)
-        {
-          size_t idx = orderingStorage[i];
-          if (idx >= numparams)
-          {
-            std::cout << "CLAP_PLUGIN_AUV2_PARAM_ORDERING: index " << idx << " at position " << i
-                      << " is out of range [0, " << numparams << ")" << std::endl;
-            orderingValid = false;
-          }
-          else if (!seen.insert(idx).second)
-          {
-            std::cout << "CLAP_PLUGIN_AUV2_PARAM_ORDERING: index " << idx << " appears more than once"
-                      << std::endl;
-            orderingValid = false;
-          }
-        }
-        // Check for any indices that were never used (implies a duplicate stole their slot).
-        for (size_t i = 0; i < numparams; ++i)
-        {
-          if (seen.find(i) == seen.end())
-          {
-            std::cout << "CLAP_PLUGIN_AUV2_PARAM_ORDERING: index " << i << " was never provided"
-                      << std::endl;
-            orderingValid = false;
-          }
-        }
-        assert(orderingValid);
-        if (orderingValid)
-        {
-          ordering = orderingStorage.data();
-          _paramOrderingProvided = true;
-        }
-      }
-    }
+        auto guarantee_mainthread = _plugin->AlwaysMainThread();
+        // creating parameters.
 
-    clap_param_info_t paraminfo;
-    for (uint32_t i = 0; i < numparams; ++i)
-    {
-      uint32_t clapIndex = ordering ? static_cast<uint32_t>(ordering[i]) : i;
-      if (p->get_info(_plugin->_plugin, clapIndex, &paraminfo))
-      {
-        double result;
-        if (p->get_value(_plugin->_plugin, paraminfo.id, &result))
+        _clumps.reset();
+        _orderedParameterList.clear();
+        _paramOrderingProvided = false;
+        auto *p = _plugin->_ext._params;
+        if (!p)
         {
+          return;
+        }
+
+        uint32_t numparams = p->count(_plugin->_plugin);
+
+        // If the plugin provides a custom AUv2 param ordering, build an indirection array.
+        // order[i] is the CLAP param index to use for AUv2 position i.
+        std::vector<size_t> orderingStorage;
+        const size_t *ordering = nullptr;
+        auto *paramOrdering = _plugin->_ext._auv2_param_ordering;
+        if (paramOrdering)
+        {
+          // Pre-fill with an out-of-range sentinel so we can detect untouched slots.
+          orderingStorage.assign(numparams, std::numeric_limits<size_t>::max());
+          if (paramOrdering->get_param_order(_plugin->_plugin, orderingStorage.data(), numparams))
+          {
+            // Sanity-check: every index 0..numparams-1 must appear exactly once.
+            std::set<size_t> seen;
+            bool orderingValid = true;
+            for (size_t i = 0; i < numparams; ++i)
+            {
+              size_t idx = orderingStorage[i];
+              if (idx >= numparams)
+              {
+                std::cout << "CLAP_PLUGIN_AUV2_PARAM_ORDERING: index " << idx << " at position "
+                          << i << " is out of range [0, " << numparams << ")" << std::endl;
+                orderingValid = false;
+              }
+              else if (!seen.insert(idx).second)
+              {
+                std::cout << "CLAP_PLUGIN_AUV2_PARAM_ORDERING: index " << idx
+                          << " appears more than once" << std::endl;
+                orderingValid = false;
+              }
+            }
+            // Check for any indices that were never used (implies a duplicate stole their slot).
+            for (size_t i = 0; i < numparams; ++i)
+            {
+              if (seen.find(i) == seen.end())
+              {
+                std::cout << "CLAP_PLUGIN_AUV2_PARAM_ORDERING: index " << i
+                          << " was never provided" << std::endl;
+                orderingValid = false;
+              }
+            }
+            assert(orderingValid);
+            if (orderingValid)
+            {
+              ordering = orderingStorage.data();
+              _paramOrderingProvided = true;
+            }
+          }
+        }
+
+        clap_param_info_t paraminfo;
+        for (uint32_t i = 0; i < numparams; ++i)
+        {
+          uint32_t clapIndex = ordering ? static_cast<uint32_t>(ordering[i]) : i;
+          if (!p->get_info(_plugin->_plugin, clapIndex, &paraminfo))
+          {
+            continue;
+          }
+
+          double result;
+          if (!p->get_value(_plugin->_plugin, paraminfo.id, &result))
+          {
+            continue;
+          }
+
           // If the parametre is already created, just restate its info
           auto piter = _parametertree.find(paraminfo.id);
           if (piter == _parametertree.end())
@@ -430,9 +443,7 @@ void WrapAsAUV2::setupParameters(const clap_plugin_t *plugin, const clap_plugin_
           Globals()->SetParameter(paraminfo.id, result);
           _orderedParameterList.push_back(static_cast<AudioUnitParameterID>(paraminfo.id));
         }
-      }
-    }
-  }
+      });
 }
 
 OSStatus WrapAsAUV2::GetParameterList(AudioUnitScope inScope, AudioUnitParameterID *outParameterList,
@@ -718,13 +729,16 @@ OSStatus WrapAsAUV2::GetProperty(AudioUnitPropertyID inID, AudioUnitScope inScop
     {
       case kAudioUnitProperty_ParameterStringFromValue:
       {
-        //         _plugin->_ext._params->value_to_text(
-        auto guarantee_mainthread = _plugin->AlwaysMainThread();
-
         char buf[200];
         auto p = (AudioUnitParameterStringFromValue *)(outData);
         double value = *p->inValue;
-        if (_plugin->_ext._params->value_to_text(_plugin->_plugin, p->inParamID, value, buf, 200))
+        if (Clap::AUv2::invokeOnMainThreadSync(
+                [this, p, value, &buf]
+                {
+                  auto guarantee_mainthread = _plugin->AlwaysMainThread();
+                  return _plugin->_ext._params->value_to_text(_plugin->_plugin, p->inParamID, value,
+                                                              buf, 200);
+                }))
         {
           p->outString = CFStringCreateWithCString(NULL, buf, kCFStringEncodingUTF8);
           return noErr;
@@ -1273,10 +1287,8 @@ OSStatus WrapAsAUV2::RestoreState(CFPropertyListRef plist)
 
   // Find 'data' key
   const void *pData = CFDictionaryGetValue(tDict, CFSTR(kAUPresetDataKey));
-  if (!pData || CFGetTypeID(CFTypeRef(pData)) != CFDataGetTypeID())
-  {
-    return -1;
-  }
+  if (!pData || CFGetTypeID(CFTypeRef(pData)) != CFDataGetTypeID()) return -1;
+
   /*
    * In the read side I fall through to default, whereas in the write
    * side I use an 'else' on the set of stream formats. This means
