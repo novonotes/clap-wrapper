@@ -22,6 +22,8 @@
 #include "AAX_Errors.h"
 #include "AAX_Assert.h"
 #include "AAX_Init.h"
+#include "AAX_CBinaryDisplayDelegate.h"
+#include "AAX_CBinaryTaperDelegate.h"
 // #include <Topology/AAX_CMonolithicParameters.h> <- this introduces way too much clutter
 
 // ----[CLAP]-----------------------------------------------------------------------
@@ -51,6 +53,8 @@
 
 // #include <mutex>
 // #include <functional>
+
+static const char *kAAXMasterBypassID = cDefaultMasterBypassID;
 
 class ClapAsAAXRegistry
 {
@@ -206,6 +210,9 @@ static void DescribeAlgorithmComponent(AAX_IComponentDescriptor *outDesc,
     err = outDesc->AddPrivateData(
         transportNodeID, sizeof(float),
         AAX_ePrivateDataOptions_DefaultOptions);  //Just here to fill the port.  Not used.
+
+  err = outDesc->AddDataInPort(AAX_FIELD_INDEX(SAAX_Wrapper_AlgorithmicContext, mBypass),
+                               sizeof(int32_t));
 
   //Add pointer to the data model instance and other interesting information.
   err =
@@ -665,6 +672,12 @@ AAX_Result ClapAsAAX::TimerWakeup()
 
 AAX_Result ClapAsAAX::GetParameterIsAutomatable(AAX_CParamID iParameterID, AAX_CBoolean *itIs) const
 {
+  if (!_aaxMasterBypassID.empty() && _aaxMasterBypassID == iParameterID)
+  {
+    *itIs = true;
+    return AAX_SUCCESS;
+  }
+
   auto n = this->_parameterMap.find(iParameterID);
   if (n != _parameterMap.end())
   {
@@ -677,6 +690,12 @@ AAX_Result ClapAsAAX::GetParameterIsAutomatable(AAX_CParamID iParameterID, AAX_C
 
 AAX_Result ClapAsAAX::GetParameterNumberOfSteps(AAX_CParamID iParameterID, int32_t *aNumSteps) const
 {
+  if (!_aaxMasterBypassID.empty() && _aaxMasterBypassID == iParameterID)
+  {
+    *aNumSteps = 2;
+    return AAX_SUCCESS;
+  }
+
   auto n = this->_parameterMap.find(iParameterID);
   if (n != _parameterMap.end())
   {
@@ -705,6 +724,12 @@ AAX_Result ClapAsAAX::GetParameterValueString(AAX_CParamID iParameterID, AAX_ISt
 AAX_Result ClapAsAAX::GetParameterValueFromString(AAX_CParamID iParameterID, double *oValuePtr,
                                                   const AAX_IString &iValueString) const
 {
+  if (!_aaxMasterBypassID.empty() && _aaxMasterBypassID == iParameterID)
+  {
+    return AAX_CEffectParameters::GetParameterValueFromString(iParameterID, oValuePtr,
+                                                              iValueString);
+  }
+
   auto n = this->_parameterMap.find(iParameterID);
   if (n != _parameterMap.end())
   {
@@ -732,6 +757,12 @@ AAX_Result ClapAsAAX::GetParameterValueFromString(AAX_CParamID iParameterID, dou
 AAX_Result ClapAsAAX::GetParameterStringFromValue(AAX_CParamID iParameterID, double value,
                                                   AAX_IString *valueString, int32_t maxLength) const
 {
+  if (!_aaxMasterBypassID.empty() && _aaxMasterBypassID == iParameterID)
+  {
+    return AAX_CEffectParameters::GetParameterStringFromValue(iParameterID, value, valueString,
+                                                              maxLength);
+  }
+
   auto n = this->_parameterMap.find(iParameterID);
   if (n != _parameterMap.end())
   {
@@ -755,6 +786,12 @@ AAX_Result ClapAsAAX::GetParameterStringFromValue(AAX_CParamID iParameterID, dou
 
 AAX_Result ClapAsAAX::GetParameterName(AAX_CParamID iParameterID, AAX_IString *oName) const
 {
+  if (!_aaxMasterBypassID.empty() && _aaxMasterBypassID == iParameterID)
+  {
+    *oName = "Master Bypass";
+    return AAX_SUCCESS;
+  }
+
   auto n = this->_parameterMap.find(iParameterID);
   if (n != _parameterMap.end())
   {
@@ -768,6 +805,12 @@ AAX_Result ClapAsAAX::GetParameterName(AAX_CParamID iParameterID, AAX_IString *o
 AAX_Result ClapAsAAX::GetParameterNameOfLength(AAX_CParamID iParameterID, AAX_IString *oName,
                                                int32_t iNameLength) const
 {
+  if (!_aaxMasterBypassID.empty() && _aaxMasterBypassID == iParameterID)
+  {
+    oName->Set(iNameLength >= 6 ? "Bypass" : "Byp");
+    return AAX_SUCCESS;
+  }
+
   AAX_Result aResult = AAX_ERROR_INVALID_STRING_CONVERSION;
   const uint32_t namelen = (uint32_t)iNameLength;
 
@@ -800,7 +843,14 @@ AAX_Result ClapAsAAX::UpdateParameterNormalizedValue(AAX_CParamID iParameterID, 
   // and yeah, no timestamps for this, so we get the parameter and pass its ID, cookie and the new value
 
   auto p = _parameterMap.find(iParameterID);
-  if (p == _parameterMap.end()) return AAX_ERROR_INVALID_PARAMETER_ID;
+  if (p == _parameterMap.end())
+  {
+    if (!_aaxMasterBypassID.empty() && _aaxMasterBypassID == iParameterID)
+    {
+      return AAX_CEffectParameters::UpdateParameterNormalizedValue(iParameterID, iValue, iSource);
+    }
+    return AAX_ERROR_INVALID_PARAMETER_ID;
+  }
   auto *ptr = p->second.get();
 
   _paramsToProcess.push(
@@ -996,7 +1046,8 @@ void ClapAsAAX::setupParameters(const clap_plugin_t *plugin, const clap_plugin_p
           }
           paramname.append(info.name);
 
-          auto id = createAAXId(info.id);
+          const bool isBypassParameter = (info.flags & CLAP_PARAM_IS_BYPASS) && !_bypassParameter;
+          auto id = isBypassParameter ? std::string(cDefaultMasterBypassID) : createAAXId(info.id);
           auto wrappedParam =
               std::make_shared<AAXWrappedParameterInfo_t>(this->_plugin->_plugin, info, id);
 
@@ -1009,14 +1060,37 @@ void ClapAsAAX::setupParameters(const clap_plugin_t *plugin, const clap_plugin_p
 
           _parameterMap[id] = wrappedParam;
           _parameterMapCLAP[info.id] = wrappedParam;
+          if (isBypassParameter)
+          {
+            _bypassParameter = wrappedParam;
+          }
 
           auto p = new AAX_CParameter<double>(
               _parameterMap[id]->_aax_identifier.c_str(), AAX_CString(paramname),
               wrappedParam->asAAXValue(info.default_value), AAX_CLinearTaperDelegate<double>(0, 1),
               AAX_ClapParamDisplayDelegate(wrappedParam), info.flags & CLAP_PARAM_IS_AUTOMATABLE);
           mParameterManager.AddParameter(p);
+          if (wrappedParam == _bypassParameter)
+          {
+            mPacketDispatcher.RegisterPacket(wrappedParam->_aax_identifier.c_str(),
+                                             AAX_FIELD_INDEX(SAAX_Wrapper_AlgorithmicContext, mBypass));
+          }
 
           wrappedParam->_paramAAXIndex = mParameterManager.GetParameterIndex(id.c_str());
+        }
+
+        if (!_bypassParameter)
+        {
+          _aaxMasterBypassID = kAAXMasterBypassID;
+          auto bypass = new AAX_CParameter<bool>(
+              _aaxMasterBypassID.c_str(), AAX_CString("Master Bypass"), false,
+              AAX_CBinaryTaperDelegate<bool>(), AAX_CBinaryDisplayDelegate<bool>("off", "on"),
+              true);
+          bypass->SetNumberOfSteps(2);
+          bypass->SetType(AAX_eParameterType_Discrete);
+          mParameterManager.AddParameter(bypass);
+          mPacketDispatcher.RegisterPacket(_aaxMasterBypassID.c_str(),
+                                           AAX_FIELD_INDEX(SAAX_Wrapper_AlgorithmicContext, mBypass));
         }
       });
   AAX_ASSERT(_activated == false);
@@ -1253,8 +1327,9 @@ void ClapAsAAX::activatePlugin()
           _processAdapter = std::make_unique<AAXProcessAdapter>();
           _processAdapter->setupProcessing(_plugin->_plugin, _plugin->getSampleRate(),
                                            _plugin->_ext._params, _plugin->_ext._audioports, this,
-                                           _gesturedparameters, _paramsToProcess, _midi_first_portid,
-                                           _midi_prefer_mididialect, _has_midi_input);
+                                           _gesturedparameters, _paramsToProcess, _bypassParameter,
+                                           _midi_first_portid, _midi_prefer_mididialect,
+                                           _has_midi_input);
 
           _activated = true;
           _plugin->activate();

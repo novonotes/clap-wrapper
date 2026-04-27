@@ -82,8 +82,9 @@ class AAXProcessAdapter
   void setupProcessing(const clap_plugin_t *plugin, double samplerate,
                        const clap_plugin_params_t *ext_param, const clap_plugin_audio_ports *ext_audio,
                        Clap::IAutomation *automation, std::vector<clap_id> &gesturedParameters,
-                       ParamChangeQueue &inqueue, uint32_t midiportid, bool preferMIDI,
-                       bool hasMIDIInput);
+                       ParamChangeQueue &inqueue,
+                       std::shared_ptr<AAXWrappedParameterInfo_t> bypassParameter,
+                       uint32_t midiportid, bool preferMIDI, bool hasMIDIInput);
   void process(SAAX_Wrapper_AlgorithmicContext *context);
   void flush();
 
@@ -122,6 +123,8 @@ class AAXProcessAdapter
   float *_silent_output = nullptr;
 
   ParamChangeQueue *_inqueue;
+  std::shared_ptr<AAXWrappedParameterInfo_t> _bypassParameter;
+  int _lastBypassState = -1;
 
   void sortEventIndices();
 
@@ -252,6 +255,8 @@ class ClapAsAAX : public AAX_CEffectParameters,
   // _parameterMap maps the AAX CParamID to the wrapped parameter
   std::map<std::string, std::shared_ptr<AAXWrappedParameterInfo_t>> _parameterMap;
   std::map<uint32_t, std::shared_ptr<AAXWrappedParameterInfo_t>> _parameterMapCLAP;
+  std::shared_ptr<AAXWrappedParameterInfo_t> _bypassParameter;
+  std::string _aaxMasterBypassID;
 
   Wrapped_AAX_GUI *_aax_view = nullptr;
 
