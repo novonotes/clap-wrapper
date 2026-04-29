@@ -136,11 +136,21 @@ WrapAsAUV2::WrapAsAUV2(AUV2_Type type, const std::string &clapname, const std::s
        */
 
       // pffffrzz();  // <- enable this to have a hook to attach a debugger
-      _plugin = Clap::Plugin::createInstance(_library._pluginFactory, _desc->id, this);
+      // Some AU hosts and AudioComponent validation paths construct/query the
+      // component from worker threads. Creating and initializing the CLAP plugin
+      // on the process main thread keeps CLAP main-thread callbacks consistent
+      // before AU starts asking for static capabilities such as audio ports.
+      _plugin = Clap::AUv2::invokeOnMainThreadSync(
+          [this] { return Clap::Plugin::createInstance(_library._pluginFactory, _desc->id, this); });
       if (_plugin)
       {
-        _plugin->initialize();
-        _os_attached.on();
+        Clap::AUv2::invokeOnMainThreadSync(
+            [this]
+            {
+              auto guarantee_mainthread = _plugin->AlwaysMainThread();
+              return _plugin->initialize();
+            });
+        Clap::AUv2::invokeOnMainThreadSync([this] { _os_attached.on(); });
       }
       else
       {
@@ -199,8 +209,15 @@ OSStatus WrapAsAUV2::Initialize()
   // activating the plugin in AU can happen in the Audio Thread (Logic Pro)
   // CLAP does not want it, therefore the wrapper insists on being in the
   // main thread
-  auto guarantee_mainthread = _plugin->AlwaysMainThread();
-  activateCLAP();
+  // Dispatching to the real main queue matters here; merely overriding the
+  // wrapper's thread guard still leaves Rust/CLAP implementations that record
+  // their own main thread seeing the wrong caller.
+  Clap::AUv2::invokeOnMainThreadSync(
+      [this]
+      {
+        auto guarantee_mainthread = _plugin->AlwaysMainThread();
+        activateCLAP();
+      });
 
 #if 0
   // get our current numChannels for input and output
@@ -278,6 +295,17 @@ void WrapAsAUV2::setupWrapperSpecifics(const clap_plugin_t *plugin)
 void WrapAsAUV2::setupAudioBusses(const clap_plugin_t *plugin,
                                   const clap_plugin_audio_ports_t *audioports)
 {
+  // This hook is reached while the CLAP proxy connects extensions, and AU hosts
+  // are free to construct components from validation/registrar worker threads.
+  // CLAP audio-port callbacks are main-thread APIs, so run the existing setup
+  // path on the main queue instead of only relaxing the wrapper's thread guard.
+  if (pthread_main_np() == 0)
+  {
+    Clap::AUv2::invokeOnMainThreadSync([&] { setupAudioBusses(plugin, audioports); });
+    return;
+  }
+
+  auto guarantee_mainthread = _plugin->AlwaysMainThread();
   auto numAudioInputs = audioports->count(plugin, true);
   auto numAudioOutputs = audioports->count(plugin, false);
 
@@ -612,6 +640,15 @@ OSStatus WrapAsAUV2::Stop()
 void WrapAsAUV2::Cleanup()
 {
   LOGINFO("[clap-wrapper] Cleaning up Plugin");
+  // Some AU hosts may tear down the AU from a worker thread during project close.
+  // CLAP GUI destruction and deactivate are main-thread APIs, so marshal the
+  // cleanup path to the main queue rather than only relaxing the thread guard.
+  if (pthread_main_np() == 0)
+  {
+    Clap::AUv2::invokeOnMainThreadSync([this] { Cleanup(); });
+    return;
+  }
+
   auto guarantee_mainthread = _plugin->AlwaysMainThread();
   if (this->_uiIsOpened)
   {
@@ -696,14 +733,22 @@ OSStatus WrapAsAUV2::GetPropertyInfo(AudioUnitPropertyID inID, AudioUnitScope in
         break;
 
       case kAudioUnitProperty_CocoaUI:
-        if (!_plugin->_ext._gui) return kAudioUnitErr_InvalidProperty;
-        if (!_plugin->_ext._gui->is_api_supported(_plugin->_plugin, CLAP_WINDOW_API_COCOA, false))
+        if (!_plugin || !_plugin->_ext._gui) return kAudioUnitErr_InvalidProperty;
+        // Apple may query this property while building AudioComponent cache,
+        // from a non-main context. Keep the original Cocoa support check, but
+        // perform the CLAP GUI extension call on the main thread.
+        if (!Clap::AUv2::invokeOnMainThreadSync(
+                [this]
+                {
+                  auto guarantee_mainthread = _plugin->AlwaysMainThread();
+                  return _plugin->_ext._gui->is_api_supported(_plugin->_plugin, CLAP_WINDOW_API_COCOA,
+                                                              false);
+                }))
           return kAudioUnitErr_InvalidProperty;
         outWritable = false;
         outDataSize = sizeof(struct AudioUnitCocoaViewInfo);
         return noErr;
         break;
-
       case kAudioUnitProperty_MIDIOutputCallbackInfo:
         outDataSize = sizeof(CFArrayRef);
         outWritable = false;
@@ -802,7 +847,13 @@ OSStatus WrapAsAUV2::GetProperty(AudioUnitPropertyID inID, AudioUnitScope inScop
         LOGINFO("[clap-wrapper] Property: kAudioUnitProperty_CocoaUI {}",
                 (_plugin) ? "plugin" : "no plugin");
         if (_plugin && _plugin->_ext._gui &&
-            (_plugin->_ext._gui->is_api_supported(_plugin->_plugin, CLAP_WINDOW_API_COCOA, false)))
+            Clap::AUv2::invokeOnMainThreadSync(
+                [this]
+                {
+                  auto guarantee_mainthread = _plugin->AlwaysMainThread();
+                  return _plugin->_ext._gui->is_api_supported(_plugin->_plugin, CLAP_WINDOW_API_COCOA,
+                                                              false);
+                }))
         {
           fillAudioUnitCocoaView(((AudioUnitCocoaViewInfo *)outData), _plugin);
           LOGINFO("[clap-wrapper] kAudioUnitProperty_CocoaUI complete");
@@ -1359,7 +1410,17 @@ bool WrapAsAUV2::ValidFormat(AudioUnitScope inScope, AudioUnitElement inElement,
     return false;
   }
 
-  // Logic Pro does not call this in the main thread - so we just pretend..
+  // AU hosts ask format-validity questions while probing or validating the
+  // component, and those calls are not guaranteed to arrive on the CLAP main
+  // thread. The old wrapper only relaxed its internal thread guard here, but
+  // CLAP plugins can keep their own main-thread identity, so perform the CLAP
+  // audio-ports reads on the actual main queue.
+  if (pthread_main_np() == 0)
+  {
+    return Clap::AUv2::invokeOnMainThreadSync(
+        [&] { return ValidFormat(inScope, inElement, inNewFormat); });
+  }
+
   auto guarantee_mainthread = _plugin->AlwaysMainThread();
 
   auto ap = _plugin->_ext._audioports;
@@ -1445,8 +1506,15 @@ OSStatus WrapAsAUV2::ChangeStreamFormat(AudioUnitScope inScope, AudioUnitElement
           {true, 0, channelCount, portType, nullptr},
           {false, 0, channelCount, portType, nullptr},
       };
-      auto guarantee_mainthread = _plugin->AlwaysMainThread();
-      _plugin->_ext._configurable_audio_ports->apply_configuration(_plugin->_plugin, requests, 2);
+      // Changing AU stream format can happen before initialization completes.
+      // Applying the equivalent CLAP configurable-audio-ports request must still
+      // be performed on the CLAP main thread.
+      Clap::AUv2::invokeOnMainThreadSync(
+          [this, &requests]
+          {
+            auto guarantee_mainthread = _plugin->AlwaysMainThread();
+            _plugin->_ext._configurable_audio_ports->apply_configuration(_plugin->_plugin, requests, 2);
+          });
     }
   }
 
@@ -1455,6 +1523,16 @@ OSStatus WrapAsAUV2::ChangeStreamFormat(AudioUnitScope inScope, AudioUnitElement
 
 UInt32 WrapAsAUV2::SupportedNumChannels(const AUChannelInfo **outInfo)
 {
+  // AU validation/configuration discovery can ask for supported channel layouts
+  // from non-main threads. CLAP audio-ports and configurable-audio-ports are
+  // main-thread APIs, so the wrapper marshals the discovery to the main queue
+  // and caches the resulting AUChannelInfo in `cinfo` for AU callers.
+  if (pthread_main_np() == 0)
+  {
+    return Clap::AUv2::invokeOnMainThreadSync([&] { return SupportedNumChannels(outInfo); });
+  }
+
+  auto guarantee_mainthread = _plugin->AlwaysMainThread();
   if (cinfo.empty() && _plugin->_ext._audioports && _plugin->_ext._configurable_audio_ports)
   {
     auto ap = _plugin->_ext._audioports;
@@ -1464,7 +1542,6 @@ UInt32 WrapAsAUV2::SupportedNumChannels(const AUChannelInfo **outInfo)
 
     if (numAudioInputs == 1 && numAudioOutputs == 1)
     {
-      auto guarantee_mainthread = _plugin->AlwaysMainThread();
       for (const auto channelCount : {1U, 2U})
       {
         const char *portType = channelCount == 1 ? CLAP_PORT_MONO : CLAP_PORT_STEREO;
@@ -1537,10 +1614,19 @@ UInt32 WrapAsAUV2::SupportedNumChannels(const AUChannelInfo **outInfo)
 
 void WrapAsAUV2::PostConstructor()
 {
+  // AU object construction may happen on validation/registrar worker threads,
+  // but the CLAP audio-ports extension is a main-thread API.
+  if (pthread_main_np() == 0)
+  {
+    Clap::AUv2::invokeOnMainThreadSync([this] { PostConstructor(); });
+    return;
+  }
+
   Base::PostConstructor();
 
   if (_plugin->_ext._audioports)
   {
+    auto guarantee_mainthread = _plugin->AlwaysMainThread();
     auto ap = _plugin->_ext._audioports;
     auto pl = _plugin->_plugin;
 

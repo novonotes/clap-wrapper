@@ -376,6 +376,7 @@ int main(int argc, char **argv)
 
 #if 1
       {
+        auto factory = std::string{"ausdk::AUMusicDeviceFactory"};
         std::cout << "    + " << u.name << " entry " << on << " from WrapAsAUV2" << std::endl;
         cppf << "struct " << on << " : free_audio::auv2_wrapper::WrapAsAUV2 {\n"
              << "   " << on << "(AudioComponentInstance ci) :\n"
@@ -387,10 +388,16 @@ int main(int argc, char **argv)
         else if (u.type == "aumi")
         {
           cppf << "AUV2_Type::aumi_noteeffect";
+          // Note effects and effects are AUBase units, not MusicDevice units.
+          // Emitting a MusicDevice factory for these types makes hosts validate
+          // the component with the wrong AU class semantics.
+          factory = "ausdk::AUBaseFactory";
         }
         else if (u.type == "aufx")
         {
           cppf << "AUV2_Type::aufx_effect";
+          // See the aumi branch above: AU effects must use AUBaseFactory.
+          factory = "ausdk::AUBaseFactory";
         }
         else
         {
@@ -401,7 +408,7 @@ int main(int argc, char **argv)
         }
         cppf << "," << args << ", ci) {}"
              << "};\n"
-             << "AUSDK_COMPONENT_ENTRY(ausdk::AUMusicDeviceFactory, " << on << ");\n";
+             << "AUSDK_COMPONENT_ENTRY(" << factory << ", " << on << ");\n";
       }
 #else
       // TODO: this will be remove
