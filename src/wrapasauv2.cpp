@@ -189,6 +189,13 @@ OSStatus WrapAsAUV2::Initialize()
   auto res = Base::Initialize();
   if (res != noErr) return res;
 
+  const auto auNumInputs = Input(0).GetStreamFormat().mChannelsPerFrame;
+  const auto auNumOutputs = Output(0).GetStreamFormat().mChannelsPerFrame;
+  if (auNumInputs != 0 && auNumOutputs != 0 && auNumInputs != auNumOutputs)
+  {
+    return kAudioUnitErr_FormatNotSupported;
+  }
+
   // activating the plugin in AU can happen in the Audio Thread (Logic Pro)
   // CLAP does not want it, therefore the wrapper insists on being in the
   // main thread
@@ -1372,6 +1379,17 @@ bool WrapAsAUV2::ValidFormat(AudioUnitScope inScope, AudioUnitElement inElement,
       // LOGINFO("In True");
       return true;
     }
+    if (numAudioInputs == 1 && inElement == 0)
+    {
+      for (const auto &info : cinfo)
+      {
+        if (info.inChannels == inNewFormat.mChannelsPerFrame &&
+            info.outChannels == inNewFormat.mChannelsPerFrame)
+        {
+          return true;
+        }
+      }
+    }
   }
   else if (inScope == kAudioUnitScope_Output)
   {
@@ -1388,6 +1406,17 @@ bool WrapAsAUV2::ValidFormat(AudioUnitScope inScope, AudioUnitElement inElement,
       // LOGINFO("Out True");
       return true;
     }
+    if (numAudioOutputs == 1 && inElement == 0)
+    {
+      for (const auto &info : cinfo)
+      {
+        if (info.inChannels == inNewFormat.mChannelsPerFrame &&
+            info.outChannels == inNewFormat.mChannelsPerFrame)
+        {
+          return true;
+        }
+      }
+    }
   }
   else if (inScope == kAudioUnitScope_Global)
   {
@@ -1403,18 +1432,67 @@ OSStatus WrapAsAUV2::ChangeStreamFormat(AudioUnitScope inScope, AudioUnitElement
 {
   // LOGINFO("ChangedStreamFormat called {} {}", inScope, inNewFormat.mChannelsPerFrame);
   auto res = ausdk::AUBase::ChangeStreamFormat(inScope, inElement, inPrevFormat, inNewFormat);
+  if (res == noErr && !_initialized.load() && _plugin->_ext._configurable_audio_ports &&
+      (inScope == kAudioUnitScope_Input || inScope == kAudioUnitScope_Output))
+  {
+    auto inputChannels = Input(0).GetStreamFormat().mChannelsPerFrame;
+    auto outputChannels = Output(0).GetStreamFormat().mChannelsPerFrame;
+    if (inputChannels == outputChannels && (inputChannels == 1 || inputChannels == 2))
+    {
+      auto channelCount = static_cast<uint32_t>(inputChannels);
+      const char *portType = channelCount == 1 ? CLAP_PORT_MONO : CLAP_PORT_STEREO;
+      clap_audio_port_configuration_request_t requests[2] = {
+          {true, 0, channelCount, portType, nullptr},
+          {false, 0, channelCount, portType, nullptr},
+      };
+      auto guarantee_mainthread = _plugin->AlwaysMainThread();
+      _plugin->_ext._configurable_audio_ports->apply_configuration(_plugin->_plugin, requests, 2);
+    }
+  }
 
   return res;
 }
 
 UInt32 WrapAsAUV2::SupportedNumChannels(const AUChannelInfo **outInfo)
 {
+  if (cinfo.empty() && _plugin->_ext._audioports && _plugin->_ext._configurable_audio_ports)
+  {
+    auto ap = _plugin->_ext._audioports;
+    auto pl = _plugin->_plugin;
+    auto numAudioInputs = ap->count(pl, true);
+    auto numAudioOutputs = ap->count(pl, false);
+
+    if (numAudioInputs == 1 && numAudioOutputs == 1)
+    {
+      auto guarantee_mainthread = _plugin->AlwaysMainThread();
+      for (const auto channelCount : {1U, 2U})
+      {
+        const char *portType = channelCount == 1 ? CLAP_PORT_MONO : CLAP_PORT_STEREO;
+        clap_audio_port_configuration_request_t requests[2] = {
+            {true, 0, channelCount, portType, nullptr},
+            {false, 0, channelCount, portType, nullptr},
+        };
+        if (_plugin->_ext._configurable_audio_ports->can_apply_configuration(pl, requests, 2))
+        {
+          cinfo.emplace_back();
+          cinfo.back().inChannels = static_cast<SInt16>(channelCount);
+          cinfo.back().outChannels = static_cast<SInt16>(channelCount);
+        }
+      }
+    }
+  }
+
   if (cinfo.empty() && _plugin->_ext._audioports)
   {
     auto ap = _plugin->_ext._audioports;
     auto pl = _plugin->_plugin;
     auto numAudioInputs = ap->count(pl, true);
     auto numAudioOutputs = ap->count(pl, false);
+
+    if (numAudioInputs == 0 && numAudioOutputs == 0)
+    {
+      return 0;
+    }
 
     std::set<int> inSets, outSets;
 
