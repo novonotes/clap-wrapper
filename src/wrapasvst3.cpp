@@ -282,7 +282,12 @@ uint32 PLUGIN_API ClapAsVst3::getLatencySamples()
   }
 
   _missedLatencyRequest = false;
-  return _plugin->_ext._latency->get(_plugin->_plugin);
+  return Clap::invokeOnMainThreadSync(
+      [this]
+      {
+        auto raise = _plugin->AlwaysMainThread();
+        return _plugin->_ext._latency->get(_plugin->_plugin);
+      });
 }
 
 uint32 PLUGIN_API ClapAsVst3::getTailSamples()
@@ -310,8 +315,13 @@ tresult PLUGIN_API ClapAsVst3::setupProcessing(Vst::ProcessSetup &newSetup)
   }
   if (_plugin->_ext._render)
   {
-    if (_plugin->_ext._render->has_hard_realtime_requirement(_plugin->_plugin) &&
-        newSetup.processMode != Vst::kRealtime)
+    const auto has_hard_realtime_requirement = Clap::invokeOnMainThreadSync(
+        [this]
+        {
+          auto raise = _plugin->AlwaysMainThread();
+          return _plugin->_ext._render->has_hard_realtime_requirement(_plugin->_plugin);
+        });
+    if (has_hard_realtime_requirement && newSetup.processMode != Vst::kRealtime)
     {
       return kResultFalse;
     }
@@ -322,7 +332,12 @@ tresult PLUGIN_API ClapAsVst3::setupProcessing(Vst::ProcessSetup &newSetup)
     }
     // handling Vst::kPrefetch as Vst::kRealTime
 
-    _plugin->_ext._render->set(_plugin->_plugin, new_render_mode);
+    Clap::invokeOnMainThreadSync(
+        [this, new_render_mode]
+        {
+          auto raise = _plugin->AlwaysMainThread();
+          _plugin->_ext._render->set(_plugin->_plugin, new_render_mode);
+        });
   }
   _plugin->setSampleRate(newSetup.sampleRate);
   _plugin->setBlockSizes(newSetup.maxSamplesPerBlock, newSetup.maxSamplesPerBlock);
@@ -370,46 +385,50 @@ tresult PLUGIN_API ClapAsVst3::setBusArrangements(Vst::SpeakerArrangement *input
     return kResultFalse;
   }
 
-  auto raise = _plugin->AlwaysMainThread();
+  return Clap::invokeOnMainThreadSync(
+      [this, inputs, numIns, outputs, numOuts] -> tresult
+      {
+        auto raise = _plugin->AlwaysMainThread();
 
-  int32_t inc = _plugin->_ext._audioports->count(_plugin->_plugin, true);
-  int32_t ouc = _plugin->_ext._audioports->count(_plugin->_plugin, false);
-  if (inc != numIns || ouc != numOuts)
-  {
-    return kResultFalse;
-  }
+        int32_t inc = _plugin->_ext._audioports->count(_plugin->_plugin, true);
+        int32_t ouc = _plugin->_ext._audioports->count(_plugin->_plugin, false);
+        if (inc != numIns || ouc != numOuts)
+        {
+          return kResultFalse;
+        }
 
-  for (int i = 0; i < numIns; ++i)
-  {
-    clap_audio_port_info_t info;
-    _plugin->_ext._audioports->get(_plugin->_plugin, i, true, &info);
-    Vst::SpeakerArrangement sa{0};
-    for (auto c = 0U; c < info.channel_count; ++c)
-    {
-      sa = (sa << 1) + 1;
-    }
-    if (inputs[i] != sa)
-    {
-      return kResultFalse;
-    }
-  }
+        for (int i = 0; i < numIns; ++i)
+        {
+          clap_audio_port_info_t info;
+          _plugin->_ext._audioports->get(_plugin->_plugin, i, true, &info);
+          Vst::SpeakerArrangement sa{0};
+          for (auto c = 0U; c < info.channel_count; ++c)
+          {
+            sa = (sa << 1) + 1;
+          }
+          if (inputs[i] != sa)
+          {
+            return kResultFalse;
+          }
+        }
 
-  for (int i = 0; i < numOuts; ++i)
-  {
-    clap_audio_port_info_t info;
-    _plugin->_ext._audioports->get(_plugin->_plugin, i, false, &info);
-    Vst::SpeakerArrangement sa{0};
-    for (auto c = 0U; c < info.channel_count; ++c)
-    {
-      sa = (sa << 1) + 1;
-    }
-    if (outputs[i] != sa)
-    {
-      return kResultFalse;
-    }
-  }
+        for (int i = 0; i < numOuts; ++i)
+        {
+          clap_audio_port_info_t info;
+          _plugin->_ext._audioports->get(_plugin->_plugin, i, false, &info);
+          Vst::SpeakerArrangement sa{0};
+          for (auto c = 0U; c < info.channel_count; ++c)
+          {
+            sa = (sa << 1) + 1;
+          }
+          if (outputs[i] != sa)
+          {
+            return kResultFalse;
+          }
+        }
 
-  return super::setBusArrangements(inputs, numIns, outputs, numOuts);
+        return super::setBusArrangements(inputs, numIns, outputs, numOuts);
+      });
 }
 
 tresult PLUGIN_API ClapAsVst3::getBusArrangement(Vst::BusDirection dir, int32 index,
@@ -489,8 +508,14 @@ tresult PLUGIN_API ClapAsVst3::getParamStringByValue(Vst::ParamID id, Vst::Param
   char outbuf[128];
   memset(outbuf, 0, sizeof(outbuf));
 
-  auto raise = _plugin->AlwaysMainThread();
-  if (this->_plugin->_ext._params->value_to_text(_plugin->_plugin, param->id, val, outbuf, 127))
+  const auto converted = Clap::invokeOnMainThreadSync(
+      [this, param, val, &outbuf]
+      {
+        auto raise = _plugin->AlwaysMainThread();
+        return this->_plugin->_ext._params->value_to_text(_plugin->_plugin, param->id, val, outbuf,
+                                                          127);
+      });
+  if (converted)
   {
     utf8_to_utf16l(outbuf, (uint16_t *)&string[0], str16BufferSize(Steinberg::Vst::String128));
 
@@ -511,8 +536,13 @@ tresult PLUGIN_API ClapAsVst3::getParamValueByString(Vst::ParamID id, Vst::TChar
   {
     return Steinberg::kResultFalse;
   }
-  auto raise = _plugin->AlwaysMainThread();
-  if (this->_plugin->_ext._params->text_to_value(_plugin->_plugin, param->id, inbuf, &out))
+  const auto converted = Clap::invokeOnMainThreadSync(
+      [this, param, &inbuf, &out]
+      {
+        auto raise = _plugin->AlwaysMainThread();
+        return this->_plugin->_ext._params->text_to_value(_plugin->_plugin, param->id, inbuf, &out);
+      });
+  if (converted)
   {
     valueNormalized = param->asVst3Value(out);
     return kResultOk;
@@ -1108,33 +1138,41 @@ bool ClapAsVst3::syncParameterValuesFromClap(const char *reason)
 {
   if (!_plugin || !_plugin->_ext._params) return false;
 
-  bool changed = false;
-  auto len = parameters.getParameterCount();
-  for (decltype(len) i = 0; i < len; ++i)
-  {
-    auto p = static_cast<Vst3Parameter *>(parameters.getParameterByIndex(i));
-    if (p->isMidi) continue;
-
-    double val;
-    if (_plugin->_ext._params->get_value(_plugin->_plugin, p->id, &val))
-    {
-      const auto old_normalized = p->getNormalized();
-      const auto new_normalized = p->asVst3Value(val);
-      LOGDETAIL("syncParameterValuesFromClap reason={} param_id={} clap_value={} vst3_old={} vst3_new={}",
-                reason, p->id, val, old_normalized, new_normalized);
-      if (old_normalized != new_normalized)
+  return Clap::invokeOnMainThreadSync(
+      [this, reason]
       {
-        p->setNormalized(new_normalized);
-        changed = true;
-      }
-    }
-    else
-    {
-      LOGINFO("syncParameterValuesFromClap reason={} param_id={} get_value failed", reason, p->id);
-    }
-  }
+        auto raise = _plugin->AlwaysMainThread();
 
-  return changed;
+        bool changed = false;
+        auto len = parameters.getParameterCount();
+        for (decltype(len) i = 0; i < len; ++i)
+        {
+          auto p = static_cast<Vst3Parameter *>(parameters.getParameterByIndex(i));
+          if (p->isMidi) continue;
+
+          double val;
+          if (_plugin->_ext._params->get_value(_plugin->_plugin, p->id, &val))
+          {
+            const auto old_normalized = p->getNormalized();
+            const auto new_normalized = p->asVst3Value(val);
+            LOGDETAIL(
+                "syncParameterValuesFromClap reason={} param_id={} clap_value={} vst3_old={} vst3_new={}",
+                reason, p->id, val, old_normalized, new_normalized);
+            if (old_normalized != new_normalized)
+            {
+              p->setNormalized(new_normalized);
+              changed = true;
+            }
+          }
+          else
+          {
+            LOGINFO("syncParameterValuesFromClap reason={} param_id={} get_value failed", reason,
+                    p->id);
+          }
+        }
+
+        return changed;
+      });
 }
 
 void ClapAsVst3::param_rescan(clap_param_rescan_flags flags)
@@ -1169,7 +1207,14 @@ void ClapAsVst3::param_rescan(clap_param_rescan_flags flags)
         // For now, don't rebuild the unit tree with modules but
         // do rescan the name
         clap_param_info_t info;
-        if (_plugin->_ext._params->get_info(_plugin->_plugin, p->param_index_for_clap_get_info, &info))
+        const auto got_info = Clap::invokeOnMainThreadSync(
+            [this, p, &info]
+            {
+              auto raise = _plugin->AlwaysMainThread();
+              return _plugin->_ext._params->get_info(_plugin->_plugin,
+                                                     p->param_index_for_clap_get_info, &info);
+            });
+        if (got_info)
         {
           str8ToStr16(p->getInfo().title, info.name, str16BufferSize(p->getInfo().title));
         }
@@ -1408,7 +1453,12 @@ void ClapAsVst3::onIdle()
   if (_requestUICallback)
   {
     _requestUICallback = false;
-    _plugin->_plugin->on_main_thread(_plugin->_plugin);
+    Clap::invokeOnMainThreadSync(
+        [this]
+        {
+          auto raise = _plugin->AlwaysMainThread();
+          _plugin->_plugin->on_main_thread(_plugin->_plugin);
+        });
   }
 
   if (_requestRestart)
@@ -1443,7 +1493,12 @@ void ClapAsVst3::onIdle()
       if (to.period > 0 && to.nexttick < now)
       {
         to.nexttick = now + to.period;
-        this->_plugin->_ext._timer->on_timer(_plugin->_plugin, to.timer_id);
+        Clap::invokeOnMainThreadSync(
+            [this, timer_id = to.timer_id]
+            {
+              auto raise = _plugin->AlwaysMainThread();
+              this->_plugin->_ext._timer->on_timer(_plugin->_plugin, timer_id);
+            });
       }
     }
   }
@@ -1532,7 +1587,12 @@ void ClapAsVst3::detachTimers(Steinberg::Linux::IRunLoop *r)
 
 void ClapAsVst3::fireTimer(clap_id timer_id)
 {
-  _plugin->_ext._timer->on_timer(_plugin->_plugin, timer_id);
+  Clap::invokeOnMainThreadSync(
+      [this, timer_id]
+      {
+        auto raise = _plugin->AlwaysMainThread();
+        _plugin->_ext._timer->on_timer(_plugin->_plugin, timer_id);
+      });
 }
 
 bool ClapAsVst3::register_fd(int fd, clap_posix_fd_flags_t flags)
@@ -1784,10 +1844,15 @@ tresult ClapAsVst3::getBusInfo(Vst::MediaType type, Vst::BusDirection dir, int32
   {
     if (type == Vst::kAudio)
     {
-      auto raise = _plugin->AlwaysMainThread();
-
       clap_audio_port_info_t info;
-      if (_plugin->_ext._audioports->get(_plugin->_plugin, (uint32_t)index, (dir == Vst::kInput), &info))
+      const auto got_info = Clap::invokeOnMainThreadSync(
+          [this, index, dir, &info]
+          {
+            auto raise = _plugin->AlwaysMainThread();
+            return _plugin->_ext._audioports->get(_plugin->_plugin, (uint32_t)index,
+                                                  (dir == Vst::kInput), &info);
+          });
+      if (got_info)
       {
         bus.mediaType = Vst::kAudio;
         bus.channelCount = info.channel_count;

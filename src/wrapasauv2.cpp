@@ -174,7 +174,7 @@ WrapAsAUV2::~WrapAsAUV2()
       _uiconn._canary = nullptr;  // disable the canary reference
 
       // close destroy the gui ourselves
-      _plugin->_ext._gui->destroy(_plugin->_plugin);
+      Clap::AUv2::invokeOnMainThreadSync([this] { _plugin->_ext._gui->destroy(_plugin->_plugin); });
       _uiIsOpened = false;
     }
 
@@ -660,7 +660,8 @@ void WrapAsAUV2::Cleanup()
       if (_plugin->_plugin && _plugin->_ext._gui)
       {
         this->_uiconn._destroyWindow();
-        this->_plugin->_ext._gui->destroy(_plugin->_plugin);
+        Clap::AUv2::invokeOnMainThreadSync(
+            [this] { this->_plugin->_ext._gui->destroy(_plugin->_plugin); });
       }
     }
   }
@@ -673,7 +674,8 @@ Float64 WrapAsAUV2::GetLatency()
   if (_plugin && _plugin->_ext._latency)
   {
     auto samplerate = this->GetStreamFormat(kAudioUnitScope_Output, 0).mSampleRate;
-    auto latency_in_samples = (double)(_plugin->_ext._latency->get(_plugin->_plugin));
+    auto latency_in_samples = Clap::AUv2::invokeOnMainThreadSync(
+        [this] { return (double)(_plugin->_ext._latency->get(_plugin->_plugin)); });
     Float64 latencytime = latency_in_samples / samplerate;
 
     return latencytime;
@@ -827,12 +829,13 @@ OSStatus WrapAsAUV2::GetProperty(AudioUnitPropertyID inID, AudioUnitScope inScop
         _uiconn._createWindow = [this]
         {
           this->_uiIsOpened = true;
-          _plugin->_ext._gui->create(_plugin->_plugin, CLAP_WINDOW_API_COCOA, false);
+          Clap::AUv2::invokeOnMainThreadSync(
+              [this] { _plugin->_ext._gui->create(_plugin->_plugin, CLAP_WINDOW_API_COCOA, false); });
         };
         _uiconn._destroyWindow = [this]
         {
           // this must exist
-          _plugin->_ext._gui->destroy(_plugin->_plugin);
+          Clap::AUv2::invokeOnMainThreadSync([this] { _plugin->_ext._gui->destroy(_plugin->_plugin); });
 
           this->_uiIsOpened = false;
           if (this->_uiconn._canary)
@@ -1262,7 +1265,7 @@ void WrapAsAUV2::onIdle()
     if (_plugin)
     {
       auto guarantee_mainthread = _plugin->AlwaysMainThread();
-      _plugin->_plugin->on_main_thread(_plugin->_plugin);
+      Clap::AUv2::invokeOnMainThreadSync([this] { _plugin->_plugin->on_main_thread(_plugin->_plugin); });
     }
   }
 }
@@ -1282,7 +1285,8 @@ OSStatus WrapAsAUV2::SaveState(CFPropertyListRef *ptPList)
   else
   {
     Clap::StateMemento chunk;
-    _plugin->_ext._state->save(_plugin->_plugin, chunk);
+    Clap::AUv2::invokeOnMainThreadSync(
+        [this, &chunk] { _plugin->_ext._state->save(_plugin->_plugin, chunk); });
 
 #if DICTIONARY_STREAM_FORMAT_JUCE
     auto err = ausdk::AUBase::SaveState(ptPList);
@@ -1373,7 +1377,8 @@ OSStatus WrapAsAUV2::RestoreState(CFPropertyListRef plist)
       UInt8 *streamData = (UInt8 *)(CFDataGetBytePtr(juceData));
 
       chunk.setData(streamData, numBytes);
-      _plugin->_ext._state->load(_plugin->_plugin, chunk);
+      Clap::AUv2::invokeOnMainThreadSync(
+          [this, &chunk] { _plugin->_ext._state->load(_plugin->_plugin, chunk); });
     }
     return noErr;
   }
@@ -1396,7 +1401,8 @@ OSStatus WrapAsAUV2::RestoreState(CFPropertyListRef plist)
     {
       Clap::StateMemento chunk;
       chunk.setData(pData, lLen);
-      _plugin->_ext._state->load(_plugin->_plugin, chunk);
+      Clap::AUv2::invokeOnMainThreadSync(
+          [this, &chunk] { _plugin->_ext._state->load(_plugin->_plugin, chunk); });
     }
   }
   return noErr;

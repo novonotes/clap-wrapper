@@ -1,4 +1,5 @@
 #include "plugview.h"
+#include "detail/shared/main_thread.h"
 #include <clap/clap.h>
 #include <cassert>
 #include <iostream>
@@ -36,7 +37,11 @@ void WrappedView::ensure_ui()
     api = CLAP_WINDOW_API_X11;
 #endif
 
-    if (_extgui->is_api_supported(_plugin, api, false)) _extgui->create(_plugin, api, false);
+    Clap::invokeOnMainThreadSync(
+        [this, api]
+        {
+          if (_extgui->is_api_supported(_plugin, api, false)) _extgui->create(_plugin, api, false);
+        });
 
     _created = true;
   }
@@ -52,7 +57,7 @@ void WrappedView::drop_ui()
     {
       _onDestroy(true);
     }
-    _extgui->destroy(_plugin);
+    Clap::invokeOnMainThreadSync([this] { _extgui->destroy(_plugin); });
     _created = false;
   }
   else
@@ -90,7 +95,9 @@ tresult PLUGIN_API WrappedView::isPlatformTypeSupported(FIDString type)
   {
     if (!strcmp(type, n->VST3))
     {
-      if (_extgui->is_api_supported(_plugin, n->CLAP, false))
+      const auto is_supported = Clap::invokeOnMainThreadSync(
+          [this, clap_type = n->CLAP] { return _extgui->is_api_supported(_plugin, clap_type, false); });
+      if (is_supported)
       {
         return kResultOk;
       }
@@ -116,20 +123,24 @@ tresult PLUGIN_API WrappedView::attached(void *parent, FIDString /*type*/)
 #endif
 
   ensure_ui();
-  _extgui->set_parent(_plugin, &_window);
-  _attached = true;
-  if (_extgui->can_resize(_plugin))
-  {
-    uint32_t w = _rect.getWidth();
-    uint32_t h = _rect.getHeight();
-    if (_extgui->adjust_size(_plugin, &w, &h))
-    {
-      _rect.right = _rect.left + w + 1;
-      _rect.bottom = _rect.top + h + 1;
-    }
-    _extgui->set_size(_plugin, w, h);
-  }
-  _extgui->show(_plugin);
+  Clap::invokeOnMainThreadSync(
+      [this]
+      {
+        _extgui->set_parent(_plugin, &_window);
+        _attached = true;
+        if (_extgui->can_resize(_plugin))
+        {
+          uint32_t w = _rect.getWidth();
+          uint32_t h = _rect.getHeight();
+          if (_extgui->adjust_size(_plugin, &w, &h))
+          {
+            _rect.right = _rect.left + w + 1;
+            _rect.bottom = _rect.top + h + 1;
+          }
+          _extgui->set_size(_plugin, w, h);
+        }
+        _extgui->show(_plugin);
+      });
   return kResultOk;
 }
 
@@ -162,7 +173,9 @@ tresult PLUGIN_API WrappedView::getSize(ViewRect *size)
   if (size)
   {
     uint32_t w, h;
-    if (_extgui->get_size(_plugin, &w, &h))
+    const auto got_size = Clap::invokeOnMainThreadSync(
+        [this, &w, &h] { return _extgui->get_size(_plugin, &w, &h); });
+    if (got_size)
     {
       size->right = size->left + w;
       size->bottom = size->top + h;
@@ -184,24 +197,27 @@ tresult PLUGIN_API WrappedView::onSize(ViewRect *newSize)
   _rect = *newSize;
   if (_created && _attached)
   {
-    if (_extgui->can_resize(_plugin))
+    const auto resized = Clap::invokeOnMainThreadSync(
+        [this]
+        {
+          if (_extgui->can_resize(_plugin))
+          {
+            uint32_t w = _rect.getWidth();
+            uint32_t h = _rect.getHeight();
+            if (_extgui->adjust_size(_plugin, &w, &h))
+            {
+              _rect.right = _rect.left + w;
+              _rect.bottom = _rect.top + h;
+            }
+            return _extgui->set_size(_plugin, w, h);
+          }
+          return false;
+        });
+    if (resized)
     {
-      uint32_t w = _rect.getWidth();
-      uint32_t h = _rect.getHeight();
-      if (_extgui->adjust_size(_plugin, &w, &h))
-      {
-        _rect.right = _rect.left + w;
-        _rect.bottom = _rect.top + h;
-      }
-      if (_extgui->set_size(_plugin, w, h))
-      {
-        return kResultOk;
-      }
+      return kResultOk;
     }
-    else
-    {
-      return kResultFalse;
-    }
+    return kResultFalse;
   }
   return kResultOk;
 }
@@ -240,7 +256,8 @@ tresult PLUGIN_API WrappedView::setFrame(IPlugFrame *frame)
 tresult PLUGIN_API WrappedView::canResize()
 {
   ensure_ui();
-  return _extgui->can_resize(_plugin) ? kResultOk : kResultFalse;
+  return Clap::invokeOnMainThreadSync([this] { return _extgui->can_resize(_plugin); }) ? kResultOk
+                                                                                       : kResultFalse;
 }
 
 tresult PLUGIN_API WrappedView::checkSizeConstraint(ViewRect *rect)
@@ -248,7 +265,9 @@ tresult PLUGIN_API WrappedView::checkSizeConstraint(ViewRect *rect)
   ensure_ui();
   uint32_t w = rect->getWidth();
   uint32_t h = rect->getHeight();
-  if (_extgui->adjust_size(_plugin, &w, &h))
+  const auto adjusted = Clap::invokeOnMainThreadSync(
+      [this, &w, &h] { return _extgui->adjust_size(_plugin, &w, &h); });
+  if (adjusted)
   {
     rect->right = rect->left + w;
     rect->bottom = rect->top + h;
@@ -273,7 +292,9 @@ bool WrappedView::request_resize(uint32_t width, uint32_t height)
 tresult WrappedView::setContentScaleFactor(IPlugViewContentScaleSupport::ScaleFactor factor)
 {
   ensure_ui();
-  if (_extgui->set_scale(_plugin, factor))
+  const auto scaled = Clap::invokeOnMainThreadSync(
+      [this, factor] { return _extgui->set_scale(_plugin, factor); });
+  if (scaled)
   {
     return kResultOk;
   }

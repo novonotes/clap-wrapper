@@ -663,7 +663,8 @@ AAX_Result ClapAsAAX::TimerWakeup()
       if (to.period_ms > 0 && to.nexttick <= now)
       {
         to.nexttick = now + to.period_ms;
-        _plugin->_ext._timer->on_timer(_plugin->_plugin, to.timer_id);
+        Clap::AAX::invokeOnMainThreadSync(
+            [this, timer_id = to.timer_id] { _plugin->_ext._timer->on_timer(_plugin->_plugin, timer_id); });
       }
     }
   }
@@ -1308,8 +1309,12 @@ void ClapAsAAX::onIdle()
   if (_wants_on_main_thread.exchange(false))
   {
     // this IS the main thread
-    auto fo = _plugin->AlwaysMainThread();
-    _plugin->_plugin->on_main_thread(_plugin->_plugin);
+    Clap::AAX::invokeOnMainThreadSync(
+        [this]
+        {
+          auto fo = _plugin->AlwaysMainThread();
+          _plugin->_plugin->on_main_thread(_plugin->_plugin);
+        });
   }
 }
 

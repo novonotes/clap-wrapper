@@ -213,10 +213,25 @@ void Plugin::connectClap(const clap_plugin_t *clap)
 {
   _plugin = clap;
 
-  // initialize the plugin
-  if (!_plugin->init(_plugin))
+  // VST3 hosts may call initialize from a thread that is not the macOS process
+  // main thread. CLAP main-thread callbacks are used by plugins to bind UI and
+  // run-loop state, so on macOS the proxy binds them to the main dispatch queue.
+  const auto initialized = invokeOnMainThreadSync(
+      [this]
+      {
+        _main_thread_id = std::this_thread::get_id();
+        auto guarantee_mainthread = AlwaysMainThread();
+        return _plugin->init(_plugin);
+      });
+
+  if (!initialized)
   {
-    _plugin->destroy(_plugin);
+    invokeOnMainThreadSync(
+        [this]
+        {
+          auto guarantee_mainthread = AlwaysMainThread();
+          _plugin->destroy(_plugin);
+        });
     _plugin = nullptr;
     return;
   }
@@ -263,7 +278,14 @@ void Plugin::connectClap(const clap_plugin_t *clap)
     api = CLAP_WINDOW_API_X11;
 #endif
 
-    if (!_ext._gui->is_api_supported(_plugin, api, false))
+    const auto is_supported = invokeOnMainThreadSync(
+        [this, api]
+        {
+          auto guarantee_mainthread = AlwaysMainThread();
+          return _ext._gui->is_api_supported(_plugin, api, false);
+        });
+
+    if (!is_supported)
     {
       // disable GUI if not win32
       _ext._gui = nullptr;
@@ -275,7 +297,12 @@ Plugin::~Plugin()
 {
   if (_plugin)
   {
-    _plugin->destroy(_plugin);
+    invokeOnMainThreadSync(
+        [this]
+        {
+          auto guarantee_mainthread = AlwaysMainThread();
+          _plugin->destroy(_plugin);
+        });
     _plugin = nullptr;
   }
 }
@@ -286,29 +313,40 @@ void Plugin::schnick()
 
 bool Plugin::initialize()
 {
-  // first check for specifics, so they are present in the
-  // setup of busses
-  _parentHost->setupWrapperSpecifics(_plugin);
+  invokeOnMainThreadSync(
+      [this]
+      {
+        auto guarantee_mainthread = AlwaysMainThread();
 
-  if (_ext._audioports)
-  {
-    _parentHost->setupAudioBusses(_plugin, _ext._audioports);
-  }
-  if (_ext._noteports)
-  {
-    _parentHost->setupMIDIBusses(_plugin, _ext._noteports);
-  }
-  if (_ext._params)
-  {
-    _parentHost->setupParameters(_plugin, _ext._params);
-  }
+        // first check for specifics, so they are present in the
+        // setup of busses
+        _parentHost->setupWrapperSpecifics(_plugin);
+
+        if (_ext._audioports)
+        {
+          _parentHost->setupAudioBusses(_plugin, _ext._audioports);
+        }
+        if (_ext._noteports)
+        {
+          _parentHost->setupMIDIBusses(_plugin, _ext._noteports);
+        }
+        if (_ext._params)
+        {
+          _parentHost->setupParameters(_plugin, _ext._params);
+        }
+      });
 
   return true;
 }
 
 void Plugin::terminate()
 {
-  _plugin->destroy(_plugin);
+  invokeOnMainThreadSync(
+      [this]
+      {
+        auto guarantee_mainthread = AlwaysMainThread();
+        _plugin->destroy(_plugin);
+      });
   _plugin = nullptr;
 }
 
@@ -327,7 +365,12 @@ bool Plugin::load(const clap_istream_t *stream) const
 {
   if (_ext._state)
   {
-    return _ext._state->load(_plugin, stream);
+    return invokeOnMainThreadSync(
+        [this, stream]
+        {
+          auto guarantee_mainthread = const_cast<Plugin *>(this)->AlwaysMainThread();
+          return _ext._state->load(_plugin, stream);
+        });
   }
   return false;
 }
@@ -336,20 +379,35 @@ bool Plugin::save(const clap_ostream_t *stream) const
 {
   if (_ext._state)
   {
-    return _ext._state->save(_plugin, stream);
+    return invokeOnMainThreadSync(
+        [this, stream]
+        {
+          auto guarantee_mainthread = const_cast<Plugin *>(this)->AlwaysMainThread();
+          return _ext._state->save(_plugin, stream);
+        });
   }
   return false;
 }
 
 bool Plugin::activate() const
 {
-  return _plugin->activate(_plugin, _audioSetup.sampleRate, _audioSetup.minFrames,
-                           _audioSetup.maxFrames);
+  return invokeOnMainThreadSync(
+      [this]
+      {
+        auto guarantee_mainthread = const_cast<Plugin *>(this)->AlwaysMainThread();
+        return _plugin->activate(_plugin, _audioSetup.sampleRate, _audioSetup.minFrames,
+                                 _audioSetup.maxFrames);
+      });
 }
 
 void Plugin::deactivate() const
 {
-  _plugin->deactivate(_plugin);
+  invokeOnMainThreadSync(
+      [this]
+      {
+        auto guarantee_mainthread = const_cast<Plugin *>(this)->AlwaysMainThread();
+        _plugin->deactivate(_plugin);
+      });
 }
 
 bool Plugin::start_processing()

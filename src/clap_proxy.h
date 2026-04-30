@@ -25,6 +25,7 @@
 #endif
 
 #include "detail/clap/fsutil.h"
+#include "detail/shared/main_thread.h"
 #include <clap/ext/draft/gain-adjustment-metering.h>
 
 namespace Clap
@@ -267,7 +268,7 @@ class Plugin
 
   clap_host_t _host;  // the host_t structure for the proxy
   IHost *_parentHost = nullptr;
-  const std::thread::id _main_thread_id = std::this_thread::get_id();
+  std::thread::id _main_thread_id = std::this_thread::get_id();
 
   AudioSetup _audioSetup;
 };
