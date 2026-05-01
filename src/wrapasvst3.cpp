@@ -1141,6 +1141,7 @@ bool ClapAsVst3::syncParameterValuesFromClap(const char *reason)
   return Clap::invokeOnMainThreadSync(
       [this, reason]
       {
+        (void)reason;
         auto raise = _plugin->AlwaysMainThread();
 
         bool changed = false;
