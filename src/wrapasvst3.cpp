@@ -386,7 +386,7 @@ tresult PLUGIN_API ClapAsVst3::setBusArrangements(Vst::SpeakerArrangement *input
   }
 
   return Clap::invokeOnMainThreadSync(
-      [this, inputs, numIns, outputs, numOuts] -> tresult
+      [this, inputs, numIns, outputs, numOuts]
       {
         auto raise = _plugin->AlwaysMainThread();
 
@@ -394,7 +394,7 @@ tresult PLUGIN_API ClapAsVst3::setBusArrangements(Vst::SpeakerArrangement *input
         int32_t ouc = _plugin->_ext._audioports->count(_plugin->_plugin, false);
         if (inc != numIns || ouc != numOuts)
         {
-          return kResultFalse;
+          return static_cast<tresult>(kResultFalse);
         }
 
         for (int i = 0; i < numIns; ++i)
@@ -408,7 +408,7 @@ tresult PLUGIN_API ClapAsVst3::setBusArrangements(Vst::SpeakerArrangement *input
           }
           if (inputs[i] != sa)
           {
-            return kResultFalse;
+            return static_cast<tresult>(kResultFalse);
           }
         }
 
@@ -423,7 +423,7 @@ tresult PLUGIN_API ClapAsVst3::setBusArrangements(Vst::SpeakerArrangement *input
           }
           if (outputs[i] != sa)
           {
-            return kResultFalse;
+            return static_cast<tresult>(kResultFalse);
           }
         }
 
