@@ -1429,6 +1429,12 @@ bool WrapAsAUV2::ValidFormat(AudioUnitScope inScope, AudioUnitElement inElement,
 
   auto guarantee_mainthread = _plugin->AlwaysMainThread();
 
+  if (cinfo.empty() && _plugin->_ext._configurable_audio_ports)
+  {
+    const AUChannelInfo *unused = nullptr;
+    SupportedNumChannels(&unused);
+  }
+
   auto ap = _plugin->_ext._audioports;
   auto pl = _plugin->_plugin;
 
