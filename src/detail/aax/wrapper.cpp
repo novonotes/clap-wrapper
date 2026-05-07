@@ -734,14 +734,20 @@ AAX_Result ClapAsAAX::GetParameterValueFromString(AAX_CParamID iParameterID, dou
   auto n = this->_parameterMap.find(iParameterID);
   if (n != _parameterMap.end())
   {
+    auto *ext_params = n->second->_ext_params;
+    if (!ext_params || !ext_params->text_to_value)
+    {
+      return AAX_ERROR_INVALID_STRING_CONVERSION;
+    }
+    double clapValue = 0.0;
     if (Clap::AAX::invokeOnMainThreadSync(
             [&]
             {
-              return n->second->_ext_params->text_to_value(_plugin->_plugin,
-                                                           n->second->_clap_param_info.id,
-                                                           iValueString.Get(), oValuePtr);
+              return ext_params->text_to_value(_plugin->_plugin, n->second->_clap_param_info.id,
+                                               iValueString.Get(), &clapValue);
             }))
     {
+      *oValuePtr = n->second->asAAXValue(clapValue);
       return AAX_SUCCESS;
     }
     else
@@ -767,13 +773,18 @@ AAX_Result ClapAsAAX::GetParameterStringFromValue(AAX_CParamID iParameterID, dou
   auto n = this->_parameterMap.find(iParameterID);
   if (n != _parameterMap.end())
   {
+    auto *ext_params = n->second->_ext_params;
+    if (!ext_params || !ext_params->value_to_text)
+    {
+      return AAX_ERROR_INVALID_STRING_CONVERSION;
+    }
     char flomf[256];
     if (Clap::AAX::invokeOnMainThreadSync(
             [&]
             {
-              return this->_plugin->_ext._params->value_to_text(
-                  _plugin->_plugin, n->second->_clap_param_info.id, n->second->asClapValue(value),
-                  flomf, sizeof(flomf));
+              return ext_params->value_to_text(_plugin->_plugin, n->second->_clap_param_info.id,
+                                               n->second->asClapValue(value), flomf,
+                                               sizeof(flomf));
             }))
     {
       *valueString = flomf;
@@ -1050,7 +1061,8 @@ void ClapAsAAX::setupParameters(const clap_plugin_t *plugin, const clap_plugin_p
           const bool isBypassParameter = (info.flags & CLAP_PARAM_IS_BYPASS) && !_bypassParameter;
           auto id = isBypassParameter ? std::string(cDefaultMasterBypassID) : createAAXId(info.id);
           auto wrappedParam =
-              std::make_shared<AAXWrappedParameterInfo_t>(this->_plugin->_plugin, info, id);
+              std::make_shared<AAXWrappedParameterInfo_t>(this->_plugin->_plugin, info, params,
+                                                          id);
 
           auto n = generateShortStrings(paramname);
           wrappedParam->_names.reserve(n.size());
