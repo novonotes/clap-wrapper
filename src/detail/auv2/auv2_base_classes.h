@@ -20,10 +20,12 @@
 #include <iostream>
 #include <memory>
 #include <map>
+#include <atomic>
 
 #include "process.h"
 #include "parameter.h"
 #include "detail/shared/fixedqueue.h"
+#include "detail/shared/spinlock.h"
 #include "detail/os/osutil.h"
 #include "detail/clap/automation.h"
 
@@ -385,6 +387,7 @@ class WrapAsAUV2 : public ausdk::AUBase,
   }
   void param_request_flush() override
   {
+    _flushRequested.store(true);
   }
 
   void latency_changed() override;
@@ -537,6 +540,8 @@ class WrapAsAUV2 : public ausdk::AUBase,
 
   std::unique_ptr<Clap::AUv2::ProcessAdapter> _processAdapter;
   std::atomic<bool> _initialized = false;
+  std::atomic_bool _flushRequested = false;
+  ClapWrapper::detail::shared::SpinLock _processOrFlushLock;
 
   // some info about the wrapped clap
   uint32_t _midi_preferred_dialect = 0;

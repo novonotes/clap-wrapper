@@ -12,6 +12,17 @@ namespace free_audio::auv2_wrapper
 
 Clap::Library _library;  // holds the library with plugins
 
+namespace
+{
+
+void formatFallbackParameterValue(char *buf, size_t bufSize, double value)
+{
+  if (!buf || bufSize == 0) return;
+  snprintf(buf, bufSize, "%.3f", value);
+}
+
+}  // namespace
+
 #if 0
 --- 8< ---
 struct ClapHostExtensions
@@ -600,7 +611,13 @@ OSStatus WrapAsAUV2::SetParameter(AudioUnitParameterID inID, AudioUnitScope inSc
       if (p != _parametertree.end())
       {
         auto &param = p->second.get()->info();
+        // Logic can call SetParameter from the render thread. Queue the AU
+        // event under the same lock used by CLAP params.flush so automation
+        // playback and GUI-originated changes cannot mutate the event buffer
+        // concurrently.
+        ClapWrapper::detail::shared::SpinLockGuard processOrFlushLock(_processOrFlushLock);
         _processAdapter->addParameterEvent(param, inValue, inBufferOffsetInFrames);
+        _flushRequested.store(true);
       }
     }
   }
@@ -785,8 +802,12 @@ OSStatus WrapAsAUV2::GetProperty(AudioUnitPropertyID inID, AudioUnitScope inScop
       {
         char buf[200];
         auto p = (AudioUnitParameterStringFromValue *)(outData);
-        double value = *p->inValue;
-        if (Clap::AUv2::invokeOnMainThreadSync(
+        double value = p->inValue ? *p->inValue : Globals()->GetParameter(p->inParamID);
+        // Tahoe の Logic は ViewBridge 経由でこの property をメインスレッド待ち中に
+        // 問い合わせることがある。ここで dispatch_sync するとハングするため、
+        // non-main thread では CLAP callback を呼ばず安全な数値表記へ fallback する。
+        if (Clap::AUv2::isMainThread() &&
+            Clap::AUv2::invokeOnMainThreadSync(
                 [this, p, value, &buf]
                 {
                   auto guarantee_mainthread = _plugin->AlwaysMainThread();
@@ -797,7 +818,9 @@ OSStatus WrapAsAUV2::GetProperty(AudioUnitPropertyID inID, AudioUnitScope inScop
           p->outString = CFStringCreateWithCString(NULL, buf, kCFStringEncodingUTF8);
           return noErr;
         }
-        return kAudioUnitErr_InvalidProperty;
+        formatFallbackParameterValue(buf, sizeof(buf), value);
+        p->outString = CFStringCreateWithCString(NULL, buf, kCFStringEncodingUTF8);
+        return noErr;
       }
       break;
       case kMusicDeviceProperty_InstrumentCount:
@@ -1129,7 +1152,10 @@ OSStatus WrapAsAUV2::Render(AudioUnitRenderActionFlags &inFlags, const AudioTime
 
     auto it_is = _plugin->AlwaysAudioThread();
 
-    _processAdapter->process(data);
+    {
+      ClapWrapper::detail::shared::SpinLockGuard processOrFlushLock(_processOrFlushLock);
+      _processAdapter->process(data);
+    }
 
     {
       for (auto &i : _midi_outports)
@@ -1216,6 +1242,20 @@ void WrapAsAUV2::onEndEdit(clap_id id)
 void WrapAsAUV2::onIdle()
 {
   if (!_plugin) return;
+  if (_flushRequested.exchange(false))
+  {
+    auto guarantee_mainthread = _plugin->AlwaysMainThread();
+    if (_processAdapter)
+    {
+      // CLAP params.flush is the host-visible handoff for queued parameter
+      // changes. Run it on idle/main thread, while sharing the process lock
+      // with Render/SetParameter so the ProcessAdapter event buffers stay
+      // single-writer.
+      ClapWrapper::detail::shared::SpinLockGuard processOrFlushLock(_processOrFlushLock);
+      _processAdapter->flush();
+    }
+  }
+
   // run queue stuff
   queueEvent e;
   while (this->_queueToUI.pop(e))

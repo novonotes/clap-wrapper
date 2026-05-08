@@ -12,13 +12,22 @@
 namespace Clap
 {
 
+inline bool isMainThread()
+{
+#if MAC
+  return pthread_main_np() != 0;
+#else
+  return true;
+#endif
+}
+
 template <typename Fn>
 auto invokeOnMainThreadSync(Fn &&fn) -> std::invoke_result_t<Fn>
 {
   using Result = std::invoke_result_t<Fn>;
 
 #if MAC
-  if (pthread_main_np() != 0)
+  if (isMainThread())
   {
     return std::forward<Fn>(fn)();
   }
