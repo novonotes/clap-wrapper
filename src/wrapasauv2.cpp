@@ -579,8 +579,20 @@ OSStatus WrapAsAUV2::GetParameterInfo(AudioUnitScope inScope, AudioUnitParameter
       // strcpy(outParameterInfo.name, info.name);
       memset(outParameterInfo.name, 0, sizeof(outParameterInfo.name));
 
-      CFRetain(f->CFString());
-      outParameterInfo.cfNameString = f->CFString();
+      CFStringRef name = f->CFString();
+      if (name)
+      {
+        CFRetain(name);
+      }
+      else
+      {
+        name = CFStringCreateWithCString(NULL, "Parameter", kCFStringEncodingUTF8);
+        if (!name)
+        {
+          return kAudioUnitErr_InvalidParameter;
+        }
+      }
+      outParameterInfo.cfNameString = name;
       outParameterInfo.minValue = info.min_value;
       outParameterInfo.maxValue = info.max_value;
       outParameterInfo.defaultValue = info.default_value;
