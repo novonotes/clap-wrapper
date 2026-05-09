@@ -269,6 +269,45 @@ tresult PLUGIN_API ClapAsVst3::getState(IBStream *state)
   return (_plugin->save(CLAPVST3StreamAdapter(state)) ? Steinberg::kResultOk : Steinberg::kResultFalse);
 }
 
+tresult PLUGIN_API ClapAsVst3::setComponentState(IBStream *state)
+{
+  // Cubase などは combined component でも controller 側の component state 経路で
+  // 復元を通知するため、IComponent::setState と同じ CLAP state load に接続する。
+  const auto ok = _plugin->load(CLAPVST3StreamAdapter(state));
+  if (!ok) return Steinberg::kResultFalse;
+
+  const auto changed = syncParameterValuesFromClap("setComponentState");
+  if (changed && this->componentHandler)
+  {
+    this->componentHandler->restartComponent(Vst::RestartFlags::kParamValuesChanged);
+  }
+
+  return Steinberg::kResultOk;
+}
+
+tresult PLUGIN_API ClapAsVst3::setEditorState(IBStream *state)
+{
+  // SingleComponentEffect では IEditController::setState が setEditorState として
+  // 分離される。ここも CLAP state に接続しないと host によって復元経路が欠落する。
+  const auto ok = _plugin->load(CLAPVST3StreamAdapter(state));
+  if (!ok) return Steinberg::kResultFalse;
+
+  const auto changed = syncParameterValuesFromClap("setEditorState");
+  if (changed && this->componentHandler)
+  {
+    this->componentHandler->restartComponent(Vst::RestartFlags::kParamValuesChanged);
+  }
+
+  return Steinberg::kResultOk;
+}
+
+tresult PLUGIN_API ClapAsVst3::getEditorState(IBStream *state)
+{
+  // controller state を要求する host でも project 保存内容を失わないよう、
+  // editor 専用 state ではなく component と同じ CLAP state を返す。
+  return (_plugin->save(CLAPVST3StreamAdapter(state)) ? Steinberg::kResultOk : Steinberg::kResultFalse);
+}
+
 uint32 PLUGIN_API ClapAsVst3::getLatencySamples()
 {
   if (!_plugin->_ext._latency)
