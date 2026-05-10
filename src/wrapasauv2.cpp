@@ -490,6 +490,9 @@ void WrapAsAUV2::setupParameters(const clap_plugin_t *plugin, const clap_plugin_
           }
           if ((paraminfo.flags & CLAP_PARAM_IS_BYPASS) && !_hasBypassParameter)
           {
+            // AU hosts can drive kAudioUnitProperty_BypassEffect without touching the
+            // plugin-specific parameter list. Keep that standard AU property backed by
+            // the CLAP bypass parameter so all formats share the same bypass state.
             _hasBypassParameter = true;
             _bypassParameterInfo = paraminfo;
           }
