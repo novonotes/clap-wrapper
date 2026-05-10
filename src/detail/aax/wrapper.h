@@ -242,6 +242,7 @@ class ClapAsAAX : public AAX_CEffectParameters,
   void stopProcessing();
 
   void process(SAAX_Wrapper_AlgorithmicContext *context);
+  bool syncParameterValuesFromClap();
 
  protected:
   Clap::Library *_library = nullptr;

@@ -944,6 +944,7 @@ AAX_Result ClapAsAAX::SetChunk(AAX_CTypeID iChunkID, const AAX_SPlugInChunk *iCh
   _state.setData(data, iChunk->fSize);
   if (Clap::AAX::invokeOnMainThreadSync([&] { return _plugin->_ext._state->load(_plugin->_plugin, _state); }))
   {
+    syncParameterValuesFromClap();
     return AAX_SUCCESS;
   }
   return AAX_ERROR_MALFORMED_CHUNK;
@@ -1139,6 +1140,38 @@ void ClapAsAAX::param_rescan(clap_param_rescan_flags flags)
               mParameterManager.GetParameterByID(wrapped._aax_identifier.c_str());
           if (aaxParam) aaxParam->SetName(AAX_CString(info.name));
         }
+      });
+}
+
+bool ClapAsAAX::syncParameterValuesFromClap()
+{
+  if (!_plugin || !_plugin->_ext._params) return false;
+
+  return Clap::AAX::invokeOnMainThreadSync(
+      [&]
+      {
+        bool changed = false;
+        for (const auto &entry : _parameterMapCLAP)
+        {
+          const auto &wrapped = entry.second;
+          double clapValue = 0.0;
+          if (!_plugin->_ext._params->get_value(_plugin->_plugin, wrapped->_clap_param_info.id,
+                                                &clapValue))
+          {
+            LOGINFO("AAX parameter sync get_value failed param_id={}", wrapped->_clap_param_info.id);
+            continue;
+          }
+
+          AAX_IParameter *aaxParam = mParameterManager.GetParameter(wrapped->_paramAAXIndex);
+          if (!aaxParam) continue;
+
+          const auto aaxValue = wrapped->asAAXValue(clapValue);
+          if (aaxParam->GetNormalizedValue() == aaxValue) continue;
+
+          aaxParam->SetNormalizedValue(aaxValue);
+          changed = true;
+        }
+        return changed;
       });
 }
 

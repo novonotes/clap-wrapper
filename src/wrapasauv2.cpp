@@ -560,6 +560,45 @@ void WrapAsAUV2::param_rescan(clap_param_rescan_flags flags)
 #endif
 }
 
+bool WrapAsAUV2::syncParameterValuesFromClap()
+{
+  if (!_plugin || !_plugin->_ext._params) return false;
+
+  return Clap::AUv2::invokeOnMainThreadSync(
+      [this]
+      {
+        auto guarantee_mainthread = _plugin->AlwaysMainThread();
+
+        bool changed = false;
+        for (const auto &entry : _parametertree)
+        {
+          const auto paramID = entry.first;
+          double clapValue = 0.0;
+          if (!_plugin->_ext._params->get_value(_plugin->_plugin, paramID, &clapValue))
+          {
+            LOGINFO("[clap-wrapper] AUv2: get_value failed while syncing param {}", paramID);
+            continue;
+          }
+
+          const auto oldValue = Globals()->GetParameter(paramID);
+          if (oldValue == clapValue) continue;
+
+          Globals()->SetParameter(paramID, clapValue);
+
+          AudioUnitEvent event;
+          event.mEventType = kAudioUnitEvent_ParameterValueChange;
+          event.mArgument.mParameter.mAudioUnit = GetComponentInstance();
+          event.mArgument.mParameter.mParameterID = static_cast<AudioUnitParameterID>(paramID);
+          event.mArgument.mParameter.mScope = kAudioUnitScope_Global;
+          event.mArgument.mParameter.mElement = 0;
+          AUEventListenerNotify(NULL, NULL, &event);
+          changed = true;
+        }
+
+        return changed;
+      });
+}
+
 // outParameterList may be a null pointer
 OSStatus WrapAsAUV2::GetParameterInfo(AudioUnitScope inScope, AudioUnitParameterID inParameterID,
                                       AudioUnitParameterInfo &outParameterInfo)
@@ -1337,8 +1376,13 @@ OSStatus WrapAsAUV2::SaveState(CFPropertyListRef *ptPList)
   else
   {
     Clap::StateMemento chunk;
-    Clap::AUv2::invokeOnMainThreadSync(
-        [this, &chunk] { _plugin->_ext._state->save(_plugin->_plugin, chunk); });
+    const auto saved = Clap::AUv2::invokeOnMainThreadSync(
+        [this, &chunk] { return _plugin->_ext._state->save(_plugin->_plugin, chunk); });
+    if (!saved)
+    {
+      LOGINFO("[clap-wrapper] AUv2: state save failed");
+      return kAudioUnitErr_InvalidPropertyValue;
+    }
 
 #if DICTIONARY_STREAM_FORMAT_JUCE
     auto err = ausdk::AUBase::SaveState(ptPList);
@@ -1397,11 +1441,9 @@ OSStatus WrapAsAUV2::RestoreState(CFPropertyListRef plist)
 
   if (!IsInitialized()) return kAudioUnitErr_Uninitialized;
 
-  CFDictionaryRef tDict = CFDictionaryRef(plist);
+  if (!_plugin->_ext._state) return AUBase::RestoreState(plist);
 
-  // Find 'data' key
-  const void *pData = CFDictionaryGetValue(tDict, CFSTR(kAUPresetDataKey));
-  if (!pData || CFGetTypeID(CFTypeRef(pData)) != CFDataGetTypeID()) return -1;
+  CFDictionaryRef tDict = CFDictionaryRef(plist);
 
   /*
    * In the read side I fall through to default, whereas in the write
@@ -1429,12 +1471,22 @@ OSStatus WrapAsAUV2::RestoreState(CFPropertyListRef plist)
       UInt8 *streamData = (UInt8 *)(CFDataGetBytePtr(juceData));
 
       chunk.setData(streamData, numBytes);
-      Clap::AUv2::invokeOnMainThreadSync(
-          [this, &chunk] { _plugin->_ext._state->load(_plugin->_plugin, chunk); });
+      const auto loaded = Clap::AUv2::invokeOnMainThreadSync(
+          [this, &chunk] { return _plugin->_ext._state->load(_plugin->_plugin, chunk); });
+      if (!loaded)
+      {
+        LOGINFO("[clap-wrapper] AUv2: JUCE state load failed");
+        return kAudioUnitErr_InvalidPropertyValue;
+      }
+      syncParameterValuesFromClap();
     }
     return noErr;
   }
 #endif
+
+  // Find 'data' key
+  const void *pData = CFDictionaryGetValue(tDict, CFSTR(kAUPresetDataKey));
+  if (!pData || CFGetTypeID(CFTypeRef(pData)) != CFDataGetTypeID()) return -1;
 
   const void *pName = CFDictionaryGetValue(tDict, CFSTR(kAUPresetNameKey));
   if (pName)
@@ -1453,11 +1505,22 @@ OSStatus WrapAsAUV2::RestoreState(CFPropertyListRef plist)
     {
       Clap::StateMemento chunk;
       chunk.setData(pData, lLen);
-      Clap::AUv2::invokeOnMainThreadSync(
-          [this, &chunk] { _plugin->_ext._state->load(_plugin->_plugin, chunk); });
+      const auto loaded = Clap::AUv2::invokeOnMainThreadSync(
+          [this, &chunk] { return _plugin->_ext._state->load(_plugin->_plugin, chunk); });
+      if (!loaded)
+      {
+        LOGINFO("[clap-wrapper] AUv2: state load failed");
+        return kAudioUnitErr_InvalidPropertyValue;
+      }
+      syncParameterValuesFromClap();
     }
   }
   return noErr;
+}
+
+void WrapAsAUV2::mark_dirty()
+{
+  PropertyChanged(kAudioUnitProperty_ClassInfo, kAudioUnitScope_Global, 0);
 }
 
 bool WrapAsAUV2::ValidFormat(AudioUnitScope inScope, AudioUnitElement inElement,

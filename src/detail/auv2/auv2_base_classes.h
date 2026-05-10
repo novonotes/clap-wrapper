@@ -340,6 +340,7 @@ class WrapAsAUV2 : public ausdk::AUBase,
 
   OSStatus SaveState(CFPropertyListRef *ptPList) override;
   OSStatus RestoreState(CFPropertyListRef plist) override;
+  bool syncParameterValuesFromClap();
 
   // render
   OSStatus Render(AudioUnitRenderActionFlags &inFlags, const AudioTimeStamp &inTimeStamp,
@@ -358,9 +359,7 @@ class WrapAsAUV2 : public ausdk::AUBase,
                          CFStringRef *outClumpName) override;
 
   // ---------------- Clap::IHost
-  void mark_dirty() override
-  {
-  }
+  void mark_dirty() override;
   void restartPlugin() override
   {
   }
