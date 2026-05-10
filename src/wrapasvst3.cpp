@@ -428,74 +428,75 @@ tresult PLUGIN_API ClapAsVst3::setBusArrangements(Vst::SpeakerArrangement *input
     return kResultFalse;
   }
 
-  return Clap::invokeOnMainThreadSync(
-      [this, inputs, numIns, outputs, numOuts]
-      {
-        auto raise = _plugin->AlwaysMainThread();
+  // SnapClip の audio_ports は create_main_thread 時点の immutable projection なので、
+  // host が worker/audio thread から問い合わせても main queue に同期委譲しない。
+  auto raise = _plugin->AlwaysMainThread();
+  int32_t inc = _plugin->_ext._audioports->count(_plugin->_plugin, true);
+  int32_t ouc = _plugin->_ext._audioports->count(_plugin->_plugin, false);
+  if (inc != numIns || ouc != numOuts)
+  {
+    return kResultFalse;
+  }
 
-        int32_t inc = _plugin->_ext._audioports->count(_plugin->_plugin, true);
-        int32_t ouc = _plugin->_ext._audioports->count(_plugin->_plugin, false);
-        if (inc != numIns || ouc != numOuts)
+  if (_plugin->_ext._configurable_audio_ports)
+  {
+    std::vector<clap_audio_port_configuration_request_t> requests;
+    requests.reserve(static_cast<size_t>(numIns + numOuts));
+
+    for (int i = 0; i < numIns; ++i)
+    {
+      const char *portType = clapPortTypeFromSpeakerArr(inputs[i]);
+      const auto channelCount = static_cast<uint32_t>(Vst::SpeakerArr::getChannelCount(inputs[i]));
+      requests.push_back({true, static_cast<uint32_t>(i), channelCount, portType, nullptr});
+    }
+
+    for (int i = 0; i < numOuts; ++i)
+    {
+      const char *portType = clapPortTypeFromSpeakerArr(outputs[i]);
+      const auto channelCount = static_cast<uint32_t>(Vst::SpeakerArr::getChannelCount(outputs[i]));
+      requests.push_back({false, static_cast<uint32_t>(i), channelCount, portType, nullptr});
+    }
+
+    const auto configured = Clap::invokeOnMainThreadSync(
+        [this, &requests]
         {
-          return static_cast<tresult>(kResultFalse);
-        }
-
-        if (_plugin->_ext._configurable_audio_ports)
-        {
-          std::vector<clap_audio_port_configuration_request_t> requests;
-          requests.reserve(static_cast<size_t>(numIns + numOuts));
-
-          for (int i = 0; i < numIns; ++i)
-          {
-            const char *portType = clapPortTypeFromSpeakerArr(inputs[i]);
-            const auto channelCount =
-                static_cast<uint32_t>(Vst::SpeakerArr::getChannelCount(inputs[i]));
-            requests.push_back({true, static_cast<uint32_t>(i), channelCount, portType, nullptr});
-          }
-
-          for (int i = 0; i < numOuts; ++i)
-          {
-            const char *portType = clapPortTypeFromSpeakerArr(outputs[i]);
-            const auto channelCount =
-                static_cast<uint32_t>(Vst::SpeakerArr::getChannelCount(outputs[i]));
-            requests.push_back({false, static_cast<uint32_t>(i), channelCount, portType, nullptr});
-          }
-
+          auto raise = _plugin->AlwaysMainThread();
           if (!_plugin->_ext._configurable_audio_ports->can_apply_configuration(
                   _plugin->_plugin, requests.data(), static_cast<uint32_t>(requests.size())))
           {
-            return static_cast<tresult>(kResultFalse);
+            return false;
           }
 
-          if (!_plugin->_ext._configurable_audio_ports->apply_configuration(
-                  _plugin->_plugin, requests.data(), static_cast<uint32_t>(requests.size())))
-          {
-            return static_cast<tresult>(kResultFalse);
-          }
-        }
+          return _plugin->_ext._configurable_audio_ports->apply_configuration(
+              _plugin->_plugin, requests.data(), static_cast<uint32_t>(requests.size()));
+        });
+    if (!configured)
+    {
+      return kResultFalse;
+    }
+  }
 
-        for (int i = 0; i < numIns; ++i)
-        {
-          clap_audio_port_info_t info;
-          _plugin->_ext._audioports->get(_plugin->_plugin, i, true, &info);
-          if (!portInfoMatchesSpeakerArr(info, inputs[i]))
-          {
-            return static_cast<tresult>(kResultFalse);
-          }
-        }
+  for (int i = 0; i < numIns; ++i)
+  {
+    clap_audio_port_info_t info;
+    _plugin->_ext._audioports->get(_plugin->_plugin, i, true, &info);
+    if (!portInfoMatchesSpeakerArr(info, inputs[i]))
+    {
+      return kResultFalse;
+    }
+  }
 
-        for (int i = 0; i < numOuts; ++i)
-        {
-          clap_audio_port_info_t info;
-          _plugin->_ext._audioports->get(_plugin->_plugin, i, false, &info);
-          if (!portInfoMatchesSpeakerArr(info, outputs[i]))
-          {
-            return static_cast<tresult>(kResultFalse);
-          }
-        }
+  for (int i = 0; i < numOuts; ++i)
+  {
+    clap_audio_port_info_t info;
+    _plugin->_ext._audioports->get(_plugin->_plugin, i, false, &info);
+    if (!portInfoMatchesSpeakerArr(info, outputs[i]))
+    {
+      return kResultFalse;
+    }
+  }
 
-        return super::setBusArrangements(inputs, numIns, outputs, numOuts);
-      });
+  return super::setBusArrangements(inputs, numIns, outputs, numOuts);
 }
 
 tresult PLUGIN_API ClapAsVst3::getBusArrangement(Vst::BusDirection dir, int32 index,
@@ -1943,13 +1944,13 @@ tresult ClapAsVst3::getBusInfo(Vst::MediaType type, Vst::BusDirection dir, int32
     if (type == Vst::kAudio)
     {
       clap_audio_port_info_t info;
-      const auto got_info = Clap::invokeOnMainThreadSync(
-          [this, index, dir, &info]
-          {
-            auto raise = _plugin->AlwaysMainThread();
-            return _plugin->_ext._audioports->get(_plugin->_plugin, (uint32_t)index,
-                                                  (dir == Vst::kInput), &info);
-          });
+      // Audacity は再生開始時に main thread で AudioIO::StartStream の完了を待ちながら、
+      // audio thread から VST3 の bus 情報を問い合わせる。ここで main queue へ同期委譲すると、
+      // main thread が audio thread の開始を待ち、audio thread が main thread を待つデッドロックになる。
+      // audio_ports.get は immutable な port layout を返すだけなので、同期委譲せず直接呼ぶ。
+      auto raise = _plugin->AlwaysMainThread();
+      const auto got_info = _plugin->_ext._audioports->get(
+          _plugin->_plugin, (uint32_t)index, (dir == Vst::kInput), &info);
       if (got_info)
       {
         bus.mediaType = Vst::kAudio;

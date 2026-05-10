@@ -565,45 +565,48 @@ AAX_Result ClapAsAAX::EffectInit()
   {
     if (Clap::AAX::invokeOnMainThreadSync([this] { return _plugin->initialize(); }))
     {
-      auto configuration_applied = Clap::AAX::invokeOnMainThreadSync(
-          [this]
-          {
-            if (!_plugin->_ext._configurable_audio_ports)
+      bool configuration_applied = true;
+      if (_plugin->_ext._configurable_audio_ports)
+      {
+        AAX_EStemFormat stem_in, stem_out;
+        _aax_ctrl->GetInputStemFormat(&stem_in);
+        _aax_ctrl->GetOutputStemFormat(&stem_out);
+
+        auto numInChannels = AAX_STEM_FORMAT_CHANNEL_COUNT(stem_in);
+        auto numOutChannels = AAX_STEM_FORMAT_CHANNEL_COUNT(stem_out);
+        auto audioports = _plugin->_ext._audioports;
+
+        // SnapClip の audio_ports は immutable projection なので、AAX の初期化スレッドを
+        // main queue に同期ブロックせず、その場で configuration request を組み立てる。
+        auto scope = _plugin->AlwaysMainThread();
+        auto numInPorts = audioports->count(_plugin->_plugin, true);
+        auto numOutPorts = audioports->count(_plugin->_plugin, false);
+
+        for (uint32_t i = 0; i < numInPorts; ++i)
+        {
+          clap_audio_port_configuration_request rq;
+          build_config_request(&rq, numInChannels, i, true);
+          _configuration_requests.emplace_back(rq);
+        }
+
+        for (uint32_t i = 0; i < numOutPorts; ++i)
+        {
+          clap_audio_port_info_t p;
+          audioports->get(_plugin->_plugin, i, false, &p);
+          clap_audio_port_configuration_request rq;
+          build_config_request(&rq, numOutChannels, i, false);
+          _configuration_requests.emplace_back(rq);
+        }
+
+        configuration_applied = Clap::AAX::invokeOnMainThreadSync(
+            [this]
             {
-              return true;
-            }
-
-            AAX_EStemFormat stem_in, stem_out;
-            _aax_ctrl->GetInputStemFormat(&stem_in);
-            _aax_ctrl->GetOutputStemFormat(&stem_out);
-
-            auto numInChannels = AAX_STEM_FORMAT_CHANNEL_COUNT(stem_in);
-            auto numOutChannels = AAX_STEM_FORMAT_CHANNEL_COUNT(stem_out);
-            auto audioports = _plugin->_ext._audioports;
-
-            auto numInPorts = audioports->count(_plugin->_plugin, true);
-            auto numOutPorts = audioports->count(_plugin->_plugin, false);
-
-            for (uint32_t i = 0; i < numInPorts; ++i)
-            {
-              clap_audio_port_configuration_request rq;
-              build_config_request(&rq, numInChannels, i, true);
-              _configuration_requests.emplace_back(rq);
-            }
-
-            for (uint32_t i = 0; i < numOutPorts; ++i)
-            {
-              clap_audio_port_info_t p;
-              audioports->get(_plugin->_plugin, i, false, &p);
-              clap_audio_port_configuration_request rq;
-              build_config_request(&rq, numOutChannels, i, false);
-              _configuration_requests.emplace_back(rq);
-            }
-
-            return _plugin->_ext._configurable_audio_ports->apply_configuration(
-                _plugin->_plugin, _configuration_requests.data(),
-                (uint32_t)_configuration_requests.size());
-          });
+              auto scope = _plugin->AlwaysMainThread();
+              return _plugin->_ext._configurable_audio_ports->apply_configuration(
+                  _plugin->_plugin, _configuration_requests.data(),
+                  (uint32_t)_configuration_requests.size());
+            });
+      }
 
       if (!configuration_applied)
       {

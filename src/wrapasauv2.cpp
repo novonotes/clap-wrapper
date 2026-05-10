@@ -4,6 +4,8 @@
 #include <set>
 #include <limits>
 #include <cassert>
+#include <utility>
+#include <vector>
 
 extern bool fillAudioUnitCocoaView(AudioUnitCocoaViewInfo *viewInfo, std::shared_ptr<Clap::Plugin>);
 
@@ -306,47 +308,65 @@ void WrapAsAUV2::setupWrapperSpecifics(const clap_plugin_t *plugin)
 void WrapAsAUV2::setupAudioBusses(const clap_plugin_t *plugin,
                                   const clap_plugin_audio_ports_t *audioports)
 {
-  // This hook is reached while the CLAP proxy connects extensions, and AU hosts
-  // are free to construct components from validation/registrar worker threads.
-  // CLAP audio-port callbacks are main-thread APIs, so run the existing setup
-  // path on the main queue instead of only relaxing the wrapper's thread guard.
-  if (pthread_main_np() == 0)
-  {
-    Clap::AUv2::invokeOnMainThreadSync([&] { setupAudioBusses(plugin, audioports); });
-    return;
-  }
-
+  // SnapClip の audio_ports は immutable projection なので直接読み、AUBase の bus 構築だけ
+  // 従来どおり main queue に寄せる。
   auto guarantee_mainthread = _plugin->AlwaysMainThread();
   auto numAudioInputs = audioports->count(plugin, true);
   auto numAudioOutputs = audioports->count(plugin, false);
+  std::vector<std::pair<UInt32, clap_audio_port_info_t>> inputInfos;
+  std::vector<std::pair<UInt32, clap_audio_port_info_t>> outputInfos;
+  inputInfos.reserve(numAudioInputs);
+  outputInfos.reserve(numAudioOutputs);
 
   LOGINFO("[clap-wrapper] Setup Busses: audio in: {}, out: {}", (int)numAudioInputs,
           (int)numAudioOutputs);
-
-  ausdk::AUBase::GetScope(kAudioUnitScope_Input).Initialize(this, kAudioUnitScope_Input, numAudioInputs);
 
   for (decltype(numAudioInputs) i = 0; i < numAudioInputs; ++i)
   {
     clap_audio_port_info_t info;
     if (audioports->get(plugin, i, true, &info))
     {
-      addAudioBusFrom(i, &info, true);
+      inputInfos.emplace_back(i, info);
     }
   }
-
-  ausdk::AUBase::GetScope(kAudioUnitScope_Output)
-      .Initialize(this, kAudioUnitScope_Output, numAudioOutputs);
 
   for (decltype(numAudioOutputs) i = 0; i < numAudioOutputs; ++i)
   {
     clap_audio_port_info_t info;
     if (audioports->get(plugin, i, false, &info))
     {
-      addAudioBusFrom(i, &info, false);
+      outputInfos.emplace_back(i, info);
     }
   }
 
-  ausdk::AUBase::ReallocateBuffers();
+  auto setupBusElements = [&]
+  {
+    ausdk::AUBase::GetScope(kAudioUnitScope_Input)
+        .Initialize(this, kAudioUnitScope_Input, numAudioInputs);
+
+    for (const auto &[index, info] : inputInfos)
+    {
+      addAudioBusFrom(static_cast<int>(index), &info, true);
+    }
+
+    ausdk::AUBase::GetScope(kAudioUnitScope_Output)
+        .Initialize(this, kAudioUnitScope_Output, numAudioOutputs);
+
+    for (const auto &[index, info] : outputInfos)
+    {
+      addAudioBusFrom(static_cast<int>(index), &info, false);
+    }
+
+    ausdk::AUBase::ReallocateBuffers();
+  };
+
+  if (pthread_main_np() == 0)
+  {
+    Clap::AUv2::invokeOnMainThreadSync(setupBusElements);
+    return;
+  }
+
+  setupBusElements();
 
 }  // called from initialize() to allow the setup of audio ports
 
@@ -1563,17 +1583,8 @@ bool WrapAsAUV2::ValidFormat(AudioUnitScope inScope, AudioUnitElement inElement,
     return false;
   }
 
-  // AU hosts ask format-validity questions while probing or validating the
-  // component, and those calls are not guaranteed to arrive on the CLAP main
-  // thread. The old wrapper only relaxed its internal thread guard here, but
-  // CLAP plugins can keep their own main-thread identity, so perform the CLAP
-  // audio-ports reads on the actual main queue.
-  if (pthread_main_np() == 0)
-  {
-    return Clap::AUv2::invokeOnMainThreadSync(
-        [&] { return ValidFormat(inScope, inElement, inNewFormat); });
-  }
-
+  // SnapClip の audio_ports は immutable projection なので、AU validation/probing が
+  // non-main thread から来ても main queue に同期委譲せずその場で読む。
   auto guarantee_mainthread = _plugin->AlwaysMainThread();
 
   if (cinfo.empty() && _plugin->_ext._configurable_audio_ports)
@@ -1682,15 +1693,8 @@ OSStatus WrapAsAUV2::ChangeStreamFormat(AudioUnitScope inScope, AudioUnitElement
 
 UInt32 WrapAsAUV2::SupportedNumChannels(const AUChannelInfo **outInfo)
 {
-  // AU validation/configuration discovery can ask for supported channel layouts
-  // from non-main threads. CLAP audio-ports and configurable-audio-ports are
-  // main-thread APIs, so the wrapper marshals the discovery to the main queue
-  // and caches the resulting AUChannelInfo in `cinfo` for AU callers.
-  if (pthread_main_np() == 0)
-  {
-    return Clap::AUv2::invokeOnMainThreadSync([&] { return SupportedNumChannels(outInfo); });
-  }
-
+  // audio_ports は projection として直接読む。configurable_audio_ports の検証だけは
+  // 状態を持つ CLAP main-thread API なので同期委譲を残す。
   auto guarantee_mainthread = _plugin->AlwaysMainThread();
   if (cinfo.empty() && _plugin->_ext._audioports && _plugin->_ext._configurable_audio_ports)
   {
@@ -1708,7 +1712,13 @@ UInt32 WrapAsAUV2::SupportedNumChannels(const AUChannelInfo **outInfo)
             {true, 0, channelCount, portType, nullptr},
             {false, 0, channelCount, portType, nullptr},
         };
-        if (_plugin->_ext._configurable_audio_ports->can_apply_configuration(pl, requests, 2))
+        const auto canApply = Clap::AUv2::invokeOnMainThreadSync(
+            [&]
+            {
+              auto guarantee_mainthread = _plugin->AlwaysMainThread();
+              return _plugin->_ext._configurable_audio_ports->can_apply_configuration(pl, requests, 2);
+            });
+        if (canApply)
         {
           cinfo.emplace_back();
           cinfo.back().inChannels = static_cast<SInt16>(channelCount);
@@ -1773,33 +1783,52 @@ UInt32 WrapAsAUV2::SupportedNumChannels(const AUChannelInfo **outInfo)
 
 void WrapAsAUV2::PostConstructor()
 {
-  // AU object construction may happen on validation/registrar worker threads,
-  // but the CLAP audio-ports extension is a main-thread API.
-  if (pthread_main_np() == 0)
-  {
-    Clap::AUv2::invokeOnMainThreadSync([this] { PostConstructor(); });
-    return;
-  }
-
-  Base::PostConstructor();
-
+  UInt32 numAudioInputs = 0;
+  UInt32 numAudioOutputs = 0;
+  std::vector<std::pair<UInt32, clap_audio_port_info_t>> inputInfos;
+  std::vector<std::pair<UInt32, clap_audio_port_info_t>> outputInfos;
   if (_plugin->_ext._audioports)
   {
     auto guarantee_mainthread = _plugin->AlwaysMainThread();
     auto ap = _plugin->_ext._audioports;
     auto pl = _plugin->_plugin;
 
-    auto numAudioInputs = ap->count(pl, true);
-    auto numAudioOutputs = ap->count(pl, false);
+    numAudioInputs = ap->count(pl, true);
+    numAudioOutputs = ap->count(pl, false);
+    inputInfos.reserve(numAudioInputs);
+    outputInfos.reserve(numAudioOutputs);
 
-    SetNumberOfElements(kAudioUnitScope_Input, numAudioInputs);
-    Inputs().SetNumberOfElements(numAudioInputs);
     for (int i = 0; i < numAudioInputs; ++i)
     {
       clap_audio_port_info inf;
-      ap->get(pl, i, true, &inf);
-      auto b = CFStringCreateWithCString(nullptr, inf.name, kCFStringEncodingUTF8);
-      Inputs().GetElement(i)->SetName(b);
+      if (ap->get(pl, i, true, &inf))
+      {
+        inputInfos.emplace_back(i, inf);
+      }
+    }
+
+    for (int i = 0; i < numAudioOutputs; ++i)
+    {
+      clap_audio_port_info inf;
+      if (ap->get(pl, i, false, &inf))
+      {
+        outputInfos.emplace_back(i, inf);
+      }
+    }
+  }
+
+  auto finishPostConstructor = [&]
+  {
+    Base::PostConstructor();
+
+    if (inputInfos.empty() && outputInfos.empty()) return;
+
+    SetNumberOfElements(kAudioUnitScope_Input, numAudioInputs);
+    Inputs().SetNumberOfElements(numAudioInputs);
+    for (const auto &[index, info] : inputInfos)
+    {
+      auto b = CFStringCreateWithCString(nullptr, info.name, kCFStringEncodingUTF8);
+      Inputs().GetElement(index)->SetName(b);
 
       /*
       AudioChannelLayout layout;
@@ -1812,12 +1841,10 @@ void WrapAsAUV2::PostConstructor()
 
     SetNumberOfElements(kAudioUnitScope_Output, numAudioOutputs);
     Outputs().SetNumberOfElements(numAudioOutputs);
-    for (int i = 0; i < numAudioOutputs; ++i)
+    for (const auto &[index, info] : outputInfos)
     {
-      clap_audio_port_info inf;
-      ap->get(pl, i, false, &inf);
-      auto b = CFStringCreateWithCString(nullptr, inf.name, kCFStringEncodingUTF8);
-      Outputs().GetElement(i)->SetName(b);
+      auto b = CFStringCreateWithCString(nullptr, info.name, kCFStringEncodingUTF8);
+      Outputs().GetElement(index)->SetName(b);
 
       /*
       AudioChannelLayout layout;
@@ -1828,7 +1855,15 @@ void WrapAsAUV2::PostConstructor()
       */
     }
     LOGINFO("[clap-wrapper] PostConstructor: Ins={} Outs={}", numAudioInputs, numAudioOutputs);
+  };
+
+  if (pthread_main_np() == 0)
+  {
+    Clap::AUv2::invokeOnMainThreadSync(finishPostConstructor);
+    return;
   }
+
+  finishPostConstructor();
   // The else here would just set elements to 0,0 which is the default
   // therefore leave it un-elsed
 }
