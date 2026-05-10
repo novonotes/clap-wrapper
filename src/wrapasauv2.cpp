@@ -401,6 +401,8 @@ void WrapAsAUV2::setupParameters(const clap_plugin_t *plugin, const clap_plugin_
         _clumps.reset();
         _orderedParameterList.clear();
         _paramOrderingProvided = false;
+        _hasBypassParameter = false;
+        _bypassParameterInfo = {};
         auto *p = _plugin->_ext._params;
         if (!p)
         {
@@ -486,10 +488,37 @@ void WrapAsAUV2::setupParameters(const clap_plugin_t *plugin, const clap_plugin_
           {
             piter->second->updateInfo(_plugin->_plugin, p, paraminfo);
           }
+          if ((paraminfo.flags & CLAP_PARAM_IS_BYPASS) && !_hasBypassParameter)
+          {
+            _hasBypassParameter = true;
+            _bypassParameterInfo = paraminfo;
+          }
           Globals()->SetParameter(paraminfo.id, result);
           _orderedParameterList.push_back(static_cast<AudioUnitParameterID>(paraminfo.id));
         }
       });
+}
+
+bool WrapAsAUV2::IsBypassEffect()
+{
+  if (!_hasBypassParameter)
+  {
+    return false;
+  }
+  const auto value = Globals()->GetParameter(_bypassParameterInfo.id);
+  const auto midpoint = (_bypassParameterInfo.min_value + _bypassParameterInfo.max_value) * 0.5;
+  return value >= midpoint;
+}
+
+void WrapAsAUV2::SetBypassEffect(bool bypass)
+{
+  if (!_hasBypassParameter)
+  {
+    return;
+  }
+  const auto value = bypass ? _bypassParameterInfo.max_value : _bypassParameterInfo.min_value;
+  SetParameter(static_cast<AudioUnitParameterID>(_bypassParameterInfo.id), kAudioUnitScope_Global,
+               0, static_cast<AudioUnitParameterValue>(value), 0);
 }
 
 OSStatus WrapAsAUV2::GetParameterList(AudioUnitScope inScope, AudioUnitParameterID *outParameterList,

@@ -520,11 +520,8 @@ class WrapAsAUV2 : public ausdk::AUBase,
 
   void activateCLAP();
   void deactivateCLAP();
-  bool IsBypassEffect()
-  {
-    return false;
-  }
-  void SetBypassEffect(bool bypass) {};
+  bool IsBypassEffect();
+  void SetBypassEffect(bool bypass);
 
   // --------------- internals
 
@@ -541,6 +538,8 @@ class WrapAsAUV2 : public ausdk::AUBase,
   std::atomic<bool> _initialized = false;
   std::atomic_bool _flushRequested = false;
   ClapWrapper::detail::shared::SpinLock _processOrFlushLock;
+  bool _hasBypassParameter = false;
+  clap_param_info_t _bypassParameterInfo = {};
 
   // some info about the wrapped clap
   uint32_t _midi_preferred_dialect = 0;
